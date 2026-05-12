@@ -1,0 +1,28 @@
+timezone: Asia/Seoul
+output_dir: output
+recipients:
+  - recipient@example.com
+targets:
+  - id: korail
+    name: 코레일
+    url: https://info.korail.com/mbs/www/neo/delay/delaylist.jsp
+    enabled: true
+    selection_mode: korail_select
+    capture_selector: div.container
+    wait_selector: select[name="indate"]
+    submit_selector: button[type="submit"]
+  - id: seoulmetro
+    name: 서울교통공사
+    url: http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543
+    enabled: true
+    selection_mode: seoulmetro_select
+    capture_selector: "#contents"
+    wait_selector: "#view_date"
+    submit_selector: "a[href*='document.searchForm.submit']"
+  - id: metro9
+    name: 서울시메트로9호선
+    url: https://www.metro9.co.kr/prog/delayCrtf/kor/sub01_09/list.do
+    enabled: true
+    selection_mode: metro9_tab
+    capture_selector: "#tab_moType1"
+    wait_selector: "#delayTmpl"
