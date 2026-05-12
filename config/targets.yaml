@@ -1,7 +1,7 @@
 timezone: Asia/Seoul
 output_dir: output
 recipients:
-  - recipient@example.com
+  - taehunhan@gmail.com
 targets:
   - id: korail
     name: 코레일
