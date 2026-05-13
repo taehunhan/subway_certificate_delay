@@ -168,8 +168,14 @@ class PlaywrightCaptureService:
                 f"for {capture_date.isoformat()}."
             )
 
-        active_selector = f'li.button_tab.on[data-tab="{capture_date.isoformat()}"]'
-        await page.wait_for_selector(active_selector, timeout=self.timeout_ms)
+        await page.wait_for_function(
+            """(delayDt) => {
+                const tab = document.querySelector(`li.button_tab[data-tab="${delayDt}"]`);
+                return Boolean(tab && tab.classList.contains("on"));
+            }""",
+            capture_date.isoformat(),
+            timeout=self.timeout_ms,
+        )
         await page.wait_for_function(
             """(selector) => {
                 const tbody = document.querySelector(selector);
