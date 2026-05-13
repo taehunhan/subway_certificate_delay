@@ -122,13 +122,59 @@ class PlaywrightCaptureService:
 
     async def _capture_metro9(self, page, target: TargetConfig, capture_date: date) -> None:
         selector = metro9_tab_selector(capture_date)
-        await page.wait_for_selector(selector, timeout=self.timeout_ms)
-        await page.locator(selector).click()
-        await page.wait_for_load_state("networkidle", timeout=self.timeout_ms)
+        await page.wait_for_selector(
+            selector,
+            state="attached",
+            timeout=self.timeout_ms,
+        )
+        await page.wait_for_function(
+            "() => typeof fn_delay_list === 'function'",
+            timeout=self.timeout_ms,
+        )
+        button_label = await page.locator(f"{selector} span").text_content()
+        if button_label is None:
+            raise ValueError(f"Could not resolve metro9 tab label for {capture_date.isoformat()}.")
+
+        async with page.expect_response(
+            lambda response: response.url.endswith("/prog/delayCrtf/kor/sub01_09/ajax.do")
+            and response.request.method == "POST",
+            timeout=self.timeout_ms,
+        ) as response_info:
+            await page.evaluate(
+                """({ delayDt, label }) => {
+                    const tab = document.querySelector(`li.button_tab[data-tab="${delayDt}"]`);
+                    if (!tab) {
+                        throw new Error(`Metro9 tab not found for ${delayDt}`);
+                    }
+
+                    document.querySelectorAll("li.button_tab").forEach((element) => {
+                        element.classList.remove("on");
+                    });
+                    tab.classList.add("on");
+
+                    const button = document.querySelector("#tab_moType1 button.station-active");
+                    if (button) {
+                        button.textContent = label.trim();
+                    }
+
+                    fn_delay_list(delayDt);
+                }""",
+                {"delayDt": capture_date.isoformat(), "label": button_label},
+            )
+        response = await response_info.value
+        if not response.ok:
+            raise ValueError(
+                f"Metro9 ajax request failed with status {response.status} "
+                f"for {capture_date.isoformat()}."
+            )
+
         active_selector = f'li.button_tab.on[data-tab="{capture_date.isoformat()}"]'
         await page.wait_for_selector(active_selector, timeout=self.timeout_ms)
-        await page.wait_for_selector(
+        await page.wait_for_function(
+            """(selector) => {
+                const tbody = document.querySelector(selector);
+                return Boolean(tbody && tbody.querySelector("tr"));
+            }""",
             target.wait_selector,
-            state="attached",
             timeout=self.timeout_ms,
         )
