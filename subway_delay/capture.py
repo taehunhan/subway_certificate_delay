@@ -173,7 +173,7 @@ class PlaywrightCaptureService:
                 const tab = document.querySelector(`li.button_tab[data-tab="${delayDt}"]`);
                 return Boolean(tab && tab.classList.contains("on"));
             }""",
-            capture_date.isoformat(),
+            arg=capture_date.isoformat(),
             timeout=self.timeout_ms,
         )
         await page.wait_for_function(
@@ -181,6 +181,6 @@ class PlaywrightCaptureService:
                 const tbody = document.querySelector(selector);
                 return Boolean(tbody && tbody.querySelector("tr"));
             }""",
-            target.wait_selector,
+            arg=target.wait_selector,
             timeout=self.timeout_ms,
         )
