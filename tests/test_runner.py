@@ -142,6 +142,54 @@ class ExecuteRunTests(unittest.TestCase):
             self.assertFalse(result.overall_success)
             self.assertEqual(result.email_error, "SMTP unavailable")
 
+    def test_custom_filename_template_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = AppConfig(
+                timezone="Asia/Seoul",
+                recipients=["recipient@example.com"],
+                output_dir=Path(temp_dir) / "output",
+                targets=[
+                    TargetConfig(
+                        id="gtx-a-wunjeong-seoul",
+                        name="GTX-A 운정중앙역-서울역",
+                        url="https://example.com/gtx",
+                        enabled=True,
+                        selection_mode="gtx_fetch",
+                        capture_selector="#main",
+                        wait_selector="#main",
+                        selection_value="L08",
+                    ),
+                    TargetConfig(
+                        id="dxline",
+                        name="신분당선",
+                        url="https://example.com/dxline",
+                        enabled=True,
+                        selection_mode="dxline_static",
+                        capture_selector="#main",
+                        wait_selector="#main",
+                        filename_template="dxline-{date}.png",
+                    ),
+                ],
+            )
+
+            result = asyncio.run(
+                execute_run(
+                    config=config,
+                    capture_date=date(2026, 5, 12),
+                    send_email=False,
+                    capture_service=FakeCaptureService(),
+                )
+            )
+
+            self.assertTrue((result.output_dir / "gtx-a-wunjeong-seoul.png").exists())
+            self.assertTrue((result.output_dir / "dxline-2026-05-12.png").exists())
+
+            with ZipFile(result.zip_path) as archive:
+                self.assertEqual(
+                    sorted(archive.namelist()),
+                    ["dxline-2026-05-12.png", "gtx-a-wunjeong-seoul.png"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

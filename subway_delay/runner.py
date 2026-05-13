@@ -131,7 +131,7 @@ async def _capture_targets(
 ) -> list[TargetResult]:
     results: list[TargetResult] = []
     for target in targets:
-        screenshot_path = run_dir / f"{target.id}.png"
+        screenshot_path = run_dir / target.screenshot_filename(capture_date)
         last_error: str | None = None
         for attempt in range(1, 3):
             try:

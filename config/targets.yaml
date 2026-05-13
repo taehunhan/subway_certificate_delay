@@ -26,3 +26,34 @@ targets:
     selection_mode: metro9_tab
     capture_selector: "#tab_moType1"
     wait_selector: "#delayTmpl"
+  - id: ui-line
+    name: 우이신설도시철도
+    url: https://www.ui-line.com/html/intro/intro05/intro_05_01.php
+    enabled: true
+    selection_mode: ui_line_tab
+    capture_selector: ".bd_vlist5"
+    wait_selector: ".bd_vlist5"
+  - id: gtx-a-wunjeong-seoul
+    name: GTX-A 운정중앙역-서울역
+    url: https://www.gtx-a.com/certificateSD.do
+    enabled: true
+    selection_mode: gtx_fetch
+    selection_value: L08
+    capture_selector: ".tab-wrap.radius"
+    wait_selector: ".tab-wrap.radius"
+  - id: gtx-a-suseo-dongtan
+    name: GTX-A 수서역-동탄역
+    url: https://www.gtx-a.com/certificateSD.do
+    enabled: true
+    selection_mode: gtx_fetch
+    selection_value: L09
+    capture_selector: ".tab-wrap.radius"
+    wait_selector: ".tab-wrap.radius"
+  - id: dxline
+    name: 신분당선
+    url: https://www.shinbundang.co.kr/index.jsp?open_main=2&open_sub1=4&open_sub2=0&pageID=%2Fcustomer%2Fcustomer4.jsp&flag=
+    enabled: true
+    selection_mode: dxline_static
+    capture_selector: ".sub_cont"
+    wait_selector: ".sub_cont"
+    filename_template: "dxline-{date}.png"

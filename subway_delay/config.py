@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,9 @@ VALID_SELECTION_MODES = {
     "korail_select",
     "seoulmetro_select",
     "metro9_tab",
+    "ui_line_tab",
+    "gtx_fetch",
+    "dxline_static",
 }
 
 
@@ -23,7 +27,13 @@ class TargetConfig:
     selection_mode: str
     capture_selector: str
     wait_selector: str
+    selection_value: str | None = None
     submit_selector: str | None = None
+    filename_template: str | None = None
+
+    def screenshot_filename(self, capture_date: date) -> str:
+        template = self.filename_template or "{id}.png"
+        return template.format(id=self.id, date=capture_date.isoformat())
 
 
 @dataclass(frozen=True)
@@ -107,6 +117,27 @@ def _parse_targets(raw_targets: Any) -> list[TargetConfig]:
                 f"Target '{item.get('id', index)}' has an invalid 'submit_selector'."
             )
 
+        selection_value = item.get("selection_value")
+        if selection_value is not None and (
+            not isinstance(selection_value, str) or not selection_value.strip()
+        ):
+            raise ValueError(
+                f"Target '{item.get('id', index)}' has an invalid 'selection_value'."
+            )
+
+        filename_template = item.get("filename_template")
+        if filename_template is not None and (
+            not isinstance(filename_template, str) or not filename_template.strip()
+        ):
+            raise ValueError(
+                f"Target '{item.get('id', index)}' has an invalid 'filename_template'."
+            )
+
+        if selection_mode == "gtx_fetch" and selection_value is None:
+            raise ValueError(
+                f"Target '{item.get('id', index)}' must define 'selection_value' for gtx_fetch."
+            )
+
         targets.append(
             TargetConfig(
                 id=_require_string(item, "id"),
@@ -116,7 +147,9 @@ def _parse_targets(raw_targets: Any) -> list[TargetConfig]:
                 selection_mode=selection_mode,
                 capture_selector=_require_string(item, "capture_selector"),
                 wait_selector=_require_string(item, "wait_selector"),
+                selection_value=selection_value.strip() if selection_value else None,
                 submit_selector=submit_selector.strip() if submit_selector else None,
+                filename_template=filename_template.strip() if filename_template else None,
             )
         )
 
