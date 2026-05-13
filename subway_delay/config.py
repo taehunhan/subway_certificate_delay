@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,10 @@ class TargetConfig:
 
     def screenshot_filename(self, capture_date: date) -> str:
         template = self.filename_template or "{id}.png"
-        return template.format(id=self.id, date=capture_date.isoformat())
+        filename_date = capture_date
+        if self.selection_mode == "dxline_static":
+            filename_date = next_business_day(capture_date)
+        return template.format(id=self.id, date=filename_date.isoformat())
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,15 @@ class AppConfig:
     @property
     def enabled_targets(self) -> list[TargetConfig]:
         return [target for target in self.targets if target.enabled]
+
+
+def next_business_day(value: date) -> date:
+    weekday = value.weekday()
+    if weekday == 4:
+        return value + timedelta(days=3)
+    if weekday == 5:
+        return value + timedelta(days=2)
+    return value + timedelta(days=1)
 
 
 def load_config(path: str | Path, base_dir: Path | None = None) -> AppConfig:

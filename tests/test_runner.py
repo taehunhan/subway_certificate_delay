@@ -182,12 +182,12 @@ class ExecuteRunTests(unittest.TestCase):
             )
 
             self.assertTrue((result.output_dir / "gtx-a-wunjeong-seoul.png").exists())
-            self.assertTrue((result.output_dir / "dxline-2026-05-12.png").exists())
+            self.assertTrue((result.output_dir / "dxline-2026-05-13.png").exists())
 
             with ZipFile(result.zip_path) as archive:
                 self.assertEqual(
                     sorted(archive.namelist()),
-                    ["dxline-2026-05-12.png", "gtx-a-wunjeong-seoul.png"],
+                    ["dxline-2026-05-13.png", "gtx-a-wunjeong-seoul.png"],
                 )
 
 

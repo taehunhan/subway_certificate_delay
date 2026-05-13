@@ -6,7 +6,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from subway_delay.config import TargetConfig, load_config
+from subway_delay.config import TargetConfig, load_config, next_business_day
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -174,6 +174,24 @@ class LoadConfigTests(unittest.TestCase):
 class TargetConfigFilenameTests(unittest.TestCase):
     def test_filename_template_expands_id_and_date(self) -> None:
         target = TargetConfig(
+            id="sample",
+            name="샘플",
+            url="https://example.com",
+            enabled=True,
+            selection_mode="gtx_fetch",
+            capture_selector="#main",
+            wait_selector="#main",
+            filename_template="sample-{date}-{id}.png",
+            selection_value="L08",
+        )
+
+        self.assertEqual(
+            target.screenshot_filename(date(2026, 5, 12)),
+            "sample-2026-05-12-sample.png",
+        )
+
+    def test_dxline_filename_uses_next_day_label(self) -> None:
+        target = TargetConfig(
             id="dxline",
             name="신분당선",
             url="https://example.com",
@@ -181,13 +199,38 @@ class TargetConfigFilenameTests(unittest.TestCase):
             selection_mode="dxline_static",
             capture_selector="#main",
             wait_selector="#main",
-            filename_template="dxline-{date}-{id}.png",
+            filename_template="dxline-{date}.png",
         )
 
         self.assertEqual(
             target.screenshot_filename(date(2026, 5, 12)),
-            "dxline-2026-05-12-dxline.png",
+            "dxline-2026-05-13.png",
         )
+
+    def test_dxline_filename_uses_next_business_day_for_friday(self) -> None:
+        target = TargetConfig(
+            id="dxline",
+            name="신분당선",
+            url="https://example.com",
+            enabled=True,
+            selection_mode="dxline_static",
+            capture_selector="#main",
+            wait_selector="#main",
+            filename_template="dxline-{date}.png",
+        )
+
+        self.assertEqual(
+            target.screenshot_filename(date(2026, 5, 15)),
+            "dxline-2026-05-18.png",
+        )
+
+
+class NextBusinessDayTests(unittest.TestCase):
+    def test_regular_weekday_moves_to_next_day(self) -> None:
+        self.assertEqual(next_business_day(date(2026, 5, 12)), date(2026, 5, 13))
+
+    def test_friday_moves_to_monday(self) -> None:
+        self.assertEqual(next_business_day(date(2026, 5, 15)), date(2026, 5, 18))
 
 
 if __name__ == "__main__":
