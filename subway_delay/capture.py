@@ -70,6 +70,12 @@ def gtx_cell_updates(records: list[dict[str, Any]]) -> dict[str, str]:
     return updates
 
 
+def initial_navigation_wait_until(target: TargetConfig) -> str:
+    if target.selection_mode == "seoulmetro_select":
+        return "commit"
+    return "domcontentloaded"
+
+
 class PlaywrightCaptureService:
     def __init__(self, timeout_ms: int = 30_000) -> None:
         self.timeout_ms = timeout_ms
@@ -96,7 +102,7 @@ class PlaywrightCaptureService:
             try:
                 await page.goto(
                     target.url,
-                    wait_until="domcontentloaded",
+                    wait_until=initial_navigation_wait_until(target),
                     timeout=self.timeout_ms,
                 )
                 await page.wait_for_selector(
@@ -156,8 +162,8 @@ class PlaywrightCaptureService:
         await page.select_option("#view_date", value=selected_value)
         if not target.submit_selector:
             raise ValueError("seoulmetro_select requires submit_selector.")
-        await page.locator(target.submit_selector).click()
-        await page.wait_for_load_state("networkidle", timeout=self.timeout_ms)
+        async with page.expect_navigation(wait_until="commit", timeout=self.timeout_ms):
+            await page.locator(target.submit_selector).click()
         await page.wait_for_selector(
             target.wait_selector,
             state="attached",
