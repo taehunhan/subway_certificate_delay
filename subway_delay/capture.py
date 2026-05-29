@@ -76,6 +76,10 @@ def initial_navigation_wait_until(target: TargetConfig) -> str:
     return "domcontentloaded"
 
 
+SEOULMETRO_TABLE_SELECTOR = "#contents .tbl-type1"
+SEOULMETRO_BOTTOM_MARKERS = ("9호선", "주의사항")
+
+
 class PlaywrightCaptureService:
     def __init__(self, timeout_ms: int = 30_000) -> None:
         self.timeout_ms = timeout_ms
@@ -164,9 +168,61 @@ class PlaywrightCaptureService:
             raise ValueError("seoulmetro_select requires submit_selector.")
         async with page.expect_navigation(wait_until="commit", timeout=self.timeout_ms):
             await page.locator(target.submit_selector).click()
+        await self._wait_for_seoulmetro_capture_ready(page, target)
+
+    async def _wait_for_seoulmetro_capture_ready(self, page, target: TargetConfig) -> None:
         await page.wait_for_selector(
             target.wait_selector,
             state="attached",
+            timeout=self.timeout_ms,
+        )
+        await page.wait_for_selector(
+            SEOULMETRO_TABLE_SELECTOR,
+            state="attached",
+            timeout=self.timeout_ms,
+        )
+        await self._wait_for_seoulmetro_bottom_markers(page, target.capture_selector)
+        await self._wait_for_stable_height(page, target.capture_selector)
+
+    async def _wait_for_seoulmetro_bottom_markers(self, page, capture_selector: str) -> None:
+        await page.wait_for_function(
+            """({ selector, lineText, noticeText }) => {
+                const container = document.querySelector(selector);
+                if (!container) {
+                    return false;
+                }
+                const text = container.textContent || "";
+                return text.includes(lineText) && text.includes(noticeText);
+            }""",
+            arg={
+                "selector": capture_selector,
+                "lineText": SEOULMETRO_BOTTOM_MARKERS[0],
+                "noticeText": SEOULMETRO_BOTTOM_MARKERS[1],
+            },
+            timeout=self.timeout_ms,
+        )
+
+    async def _wait_for_stable_height(self, page, selector: str) -> None:
+        await page.wait_for_function(
+            """({ selector, stableCount }) => {
+                const element = document.querySelector(selector);
+                if (!element) {
+                    return false;
+                }
+
+                const height = Math.max(
+                    Math.ceil(element.scrollHeight || 0),
+                    Math.ceil(element.getBoundingClientRect().height || 0)
+                );
+                window.__codexStableHeights = window.__codexStableHeights || {};
+
+                const previous = window.__codexStableHeights[selector] || { height: -1, stable: 0 };
+                const stable = previous.height === height ? previous.stable + 1 : 1;
+                window.__codexStableHeights[selector] = { height, stable };
+
+                return stable >= stableCount;
+            }""",
+            arg={"selector": selector, "stableCount": 2},
             timeout=self.timeout_ms,
         )
 
