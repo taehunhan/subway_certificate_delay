@@ -71,9 +71,11 @@ def gtx_cell_updates(records: list[dict[str, Any]]) -> dict[str, str]:
 
 
 def initial_navigation_wait_until(target: TargetConfig) -> str:
-    if target.selection_mode == "seoulmetro_select":
-        return "commit"
-    return "domcontentloaded"
+    return target.initial_wait_until
+
+
+def submit_navigation_wait_until(target: TargetConfig) -> str:
+    return target.submit_wait_until
 
 
 SEOULMETRO_TABLE_SELECTOR = "#contents .tbl-type1"
@@ -143,9 +145,7 @@ class PlaywrightCaptureService:
 
     async def _capture_korail(self, page, target: TargetConfig, capture_date: date) -> None:
         await page.select_option('select[name="indate"]', value=capture_date.isoformat())
-        if target.submit_selector:
-            await page.locator(target.submit_selector).click()
-            await page.wait_for_load_state("networkidle", timeout=self.timeout_ms)
+        await self._submit_target_form(page, target)
         await page.wait_for_selector(
             target.wait_selector,
             state="attached",
@@ -166,9 +166,18 @@ class PlaywrightCaptureService:
         await page.select_option("#view_date", value=selected_value)
         if not target.submit_selector:
             raise ValueError("seoulmetro_select requires submit_selector.")
-        async with page.expect_navigation(wait_until="commit", timeout=self.timeout_ms):
-            await page.locator(target.submit_selector).click()
+        await self._submit_target_form(page, target)
         await self._wait_for_seoulmetro_capture_ready(page, target)
+
+    async def _submit_target_form(self, page, target: TargetConfig) -> None:
+        if not target.submit_selector:
+            return
+
+        async with page.expect_navigation(
+            wait_until=submit_navigation_wait_until(target),
+            timeout=self.timeout_ms,
+        ):
+            await page.locator(target.submit_selector).click()
 
     async def _wait_for_seoulmetro_capture_ready(self, page, target: TargetConfig) -> None:
         await page.wait_for_selector(

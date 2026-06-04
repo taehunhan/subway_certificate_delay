@@ -9,6 +9,9 @@ Python program that captures the summary delay certificate pages for selected su
 2. Install the Playwright browser.
    `python3 -m playwright install --with-deps chromium`
 3. Update [config/targets.yaml](/Users/taehunhan/Python/subway_certificate_delay/config/targets.yaml) with your recipient list.
+   Optional per-target load policy fields:
+   `initial_wait_until` for the first `page.goto()`, `submit_wait_until` for submit navigation.
+   If omitted, they default to `domcontentloaded` and `networkidle`. Use `commit` for flaky pages that time out before the DOM finishes loading.
 4. Export SMTP variables.
    `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
 5. Run manually.

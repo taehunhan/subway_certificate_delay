@@ -17,6 +17,13 @@ VALID_SELECTION_MODES = {
     "dxline_static",
 }
 
+VALID_WAIT_UNTIL = {
+    "commit",
+    "domcontentloaded",
+    "load",
+    "networkidle",
+}
+
 
 @dataclass(frozen=True)
 class TargetConfig:
@@ -30,6 +37,8 @@ class TargetConfig:
     selection_value: str | None = None
     submit_selector: str | None = None
     filename_template: str | None = None
+    initial_wait_until: str = "domcontentloaded"
+    submit_wait_until: str = "networkidle"
 
     def screenshot_filename(self, capture_date: date) -> str:
         template = self.filename_template or "{id}.png"
@@ -145,6 +154,19 @@ def _parse_targets(raw_targets: Any) -> list[TargetConfig]:
                 f"Target '{item.get('id', index)}' has an invalid 'filename_template'."
             )
 
+        initial_wait_until = _parse_wait_until(
+            item,
+            key="initial_wait_until",
+            target_id=item.get("id", index),
+            default="domcontentloaded",
+        )
+        submit_wait_until = _parse_wait_until(
+            item,
+            key="submit_wait_until",
+            target_id=item.get("id", index),
+            default="networkidle",
+        )
+
         if selection_mode == "gtx_fetch" and selection_value is None:
             raise ValueError(
                 f"Target '{item.get('id', index)}' must define 'selection_value' for gtx_fetch."
@@ -162,6 +184,8 @@ def _parse_targets(raw_targets: Any) -> list[TargetConfig]:
                 selection_value=selection_value.strip() if selection_value else None,
                 submit_selector=submit_selector.strip() if submit_selector else None,
                 filename_template=filename_template.strip() if filename_template else None,
+                initial_wait_until=initial_wait_until,
+                submit_wait_until=submit_wait_until,
             )
         )
 
@@ -173,3 +197,23 @@ def _require_string(mapping: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"'{key}' must be a non-empty string.")
     return value.strip()
+
+
+def _parse_wait_until(
+    mapping: dict[str, Any],
+    *,
+    key: str,
+    target_id: Any,
+    default: str,
+) -> str:
+    value = mapping.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Target '{target_id}' has an invalid '{key}'.")
+
+    normalized = value.strip()
+    if normalized not in VALID_WAIT_UNTIL:
+        raise ValueError(
+            f"Target '{target_id}' has unsupported '{key}' value '{normalized}'. "
+            f"Expected one of: {', '.join(sorted(VALID_WAIT_UNTIL))}."
+        )
+    return normalized

@@ -9,6 +9,8 @@ targets:
     url: https://info.korail.com/mbs/www/neo/delay/delaylist.jsp
     enabled: true
     selection_mode: korail_select
+    initial_wait_until: commit
+    submit_wait_until: commit
     capture_selector: div.container
     wait_selector: select[name="indate"]
     submit_selector: button[type="submit"]
@@ -17,6 +19,8 @@ targets:
     url: http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543
     enabled: true
     selection_mode: seoulmetro_select
+    initial_wait_until: commit
+    submit_wait_until: commit
     capture_selector: "#contents"
     wait_selector: "#view_date"
     submit_selector: "a[href*='document.searchForm.submit']"

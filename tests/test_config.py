@@ -132,6 +132,8 @@ class LoadConfigTests(unittest.TestCase):
                 enabled: true
                 selection_mode: gtx_fetch
                 selection_value: L08
+                initial_wait_until: load
+                submit_wait_until: commit
                 capture_selector: "#main"
                 wait_selector: "#main"
                 filename_template: "gtx-{date}.png"
@@ -145,6 +147,8 @@ class LoadConfigTests(unittest.TestCase):
 
         self.assertEqual(config.targets[0].selection_value, "L08")
         self.assertEqual(config.targets[0].filename_template, "gtx-{date}.png")
+        self.assertEqual(config.targets[0].initial_wait_until, "load")
+        self.assertEqual(config.targets[0].submit_wait_until, "commit")
 
     def test_gtx_fetch_requires_selection_value(self) -> None:
         config_text = textwrap.dedent(
@@ -159,6 +163,82 @@ class LoadConfigTests(unittest.TestCase):
                 url: https://example.com
                 enabled: true
                 selection_mode: gtx_fetch
+                capture_selector: "#main"
+                wait_selector: "#main"
+            """
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "targets.yaml"
+            config_path.write_text(config_text, encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_config(config_path, base_dir=Path(temp_dir))
+
+    def test_wait_until_defaults_apply_when_fields_are_omitted(self) -> None:
+        config_text = textwrap.dedent(
+            """
+            timezone: Asia/Seoul
+            output_dir: output
+            recipients:
+              - first@example.com
+            targets:
+              - id: one
+                name: One
+                url: https://example.com
+                enabled: true
+                selection_mode: korail_select
+                capture_selector: "#main"
+                wait_selector: "#main"
+            """
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "targets.yaml"
+            config_path.write_text(config_text, encoding="utf-8")
+
+            config = load_config(config_path, base_dir=Path(temp_dir))
+
+        self.assertEqual(config.targets[0].initial_wait_until, "domcontentloaded")
+        self.assertEqual(config.targets[0].submit_wait_until, "networkidle")
+
+    def test_invalid_initial_wait_until_raises(self) -> None:
+        config_text = textwrap.dedent(
+            """
+            timezone: Asia/Seoul
+            output_dir: output
+            recipients:
+              - first@example.com
+            targets:
+              - id: one
+                name: One
+                url: https://example.com
+                enabled: true
+                selection_mode: korail_select
+                initial_wait_until: madeup
+                capture_selector: "#main"
+                wait_selector: "#main"
+            """
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "targets.yaml"
+            config_path.write_text(config_text, encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_config(config_path, base_dir=Path(temp_dir))
+
+    def test_invalid_submit_wait_until_raises(self) -> None:
+        config_text = textwrap.dedent(
+            """
+            timezone: Asia/Seoul
+            output_dir: output
+            recipients:
+              - first@example.com
+            targets:
+              - id: one
+                name: One
+                url: https://example.com
+                enabled: true
+                selection_mode: korail_select
+                submit_wait_until: later
                 capture_selector: "#main"
                 wait_selector: "#main"
             """
