@@ -78,6 +78,16 @@ def submit_navigation_wait_until(target: TargetConfig) -> str:
     return target.submit_wait_until
 
 
+def https_fallback_url(url: str) -> str | None:
+    if not url.startswith("http://"):
+        return None
+    return "https://" + url.removeprefix("http://")
+
+
+def should_retry_with_https_fallback(url: str, error: Exception) -> bool:
+    return https_fallback_url(url) is not None and error.__class__.__name__ == "TimeoutError"
+
+
 SEOULMETRO_TABLE_SELECTOR = "#contents .tbl-type1"
 SEOULMETRO_BOTTOM_MARKERS = ("9호선", "주의사항")
 
@@ -106,11 +116,7 @@ class PlaywrightCaptureService:
             )
             page = await context.new_page()
             try:
-                await page.goto(
-                    target.url,
-                    wait_until=initial_navigation_wait_until(target),
-                    timeout=self.timeout_ms,
-                )
+                await self._goto_target_page(page, target)
                 await page.wait_for_selector(
                     target.wait_selector,
                     state="attached",
@@ -142,6 +148,24 @@ class PlaywrightCaptureService:
         if target.selection_mode == "dxline_static":
             return
         raise ValueError(f"Unsupported selection_mode: {target.selection_mode}")
+
+    async def _goto_target_page(self, page, target: TargetConfig) -> None:
+        wait_until = initial_navigation_wait_until(target)
+        try:
+            await page.goto(
+                target.url,
+                wait_until=wait_until,
+                timeout=self.timeout_ms,
+            )
+        except Exception as exc:
+            fallback_url = https_fallback_url(target.url)
+            if fallback_url is None or not should_retry_with_https_fallback(target.url, exc):
+                raise
+            await page.goto(
+                fallback_url,
+                wait_until=wait_until,
+                timeout=self.timeout_ms,
+            )
 
     async def _capture_korail(self, page, target: TargetConfig, capture_date: date) -> None:
         await page.select_option('select[name="indate"]', value=capture_date.isoformat())

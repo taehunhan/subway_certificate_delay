@@ -9,7 +9,9 @@ from subway_delay.capture import (
     SEOULMETRO_BOTTOM_MARKERS,
     SEOULMETRO_TABLE_SELECTOR,
     PlaywrightCaptureService,
+    https_fallback_url,
     initial_navigation_wait_until,
+    should_retry_with_https_fallback,
     submit_navigation_wait_until,
 )
 from subway_delay.config import TargetConfig
@@ -65,9 +67,21 @@ class RecordingNavigationContext:
 
 
 class RecordingPage:
-    def __init__(self, options: list[dict[str, str]] | None = None) -> None:
+    def __init__(
+        self,
+        options: list[dict[str, str]] | None = None,
+        goto_side_effects: list[Exception | None] | None = None,
+    ) -> None:
         self.options = options or []
+        self.goto_side_effects = goto_side_effects or []
         self.calls: list[tuple] = []
+
+    async def goto(self, url: str, *, wait_until: str, timeout: int | None = None) -> None:
+        self.calls.append(("goto", url, wait_until, timeout))
+        if self.goto_side_effects:
+            side_effect = self.goto_side_effects.pop(0)
+            if side_effect is not None:
+                raise side_effect
 
     def locator(self, selector: str) -> RecordingLocator:
         self.calls.append(("locator", selector))
@@ -96,6 +110,10 @@ class RecordingPage:
         timeout: int | None = None,
     ) -> None:
         self.calls.append(("wait_for_function", expression, arg, timeout))
+
+
+class TimeoutError(Exception):
+    pass
 
 
 class CaptureNavigationTests(unittest.TestCase):
@@ -127,6 +145,33 @@ class CaptureNavigationTests(unittest.TestCase):
 
         self.assertEqual(submit_navigation_wait_until(target), "networkidle")
 
+    def test_https_fallback_url_upgrades_http(self) -> None:
+        self.assertEqual(
+            https_fallback_url("http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"),
+            "https://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+        )
+
+    def test_https_fallback_url_ignores_non_http(self) -> None:
+        self.assertIsNone(
+            https_fallback_url("https://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543")
+        )
+
+    def test_timeout_on_http_is_retryable_with_https_fallback(self) -> None:
+        self.assertTrue(
+            should_retry_with_https_fallback(
+                "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                TimeoutError("timed out"),
+            )
+        )
+
+    def test_non_timeout_error_does_not_trigger_https_fallback(self) -> None:
+        self.assertFalse(
+            should_retry_with_https_fallback(
+                "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                RuntimeError("boom"),
+            )
+        )
+
 
 class KorailCaptureTests(unittest.TestCase):
     def test_capture_korail_submits_with_configured_wait_until(self) -> None:
@@ -157,6 +202,42 @@ class KorailCaptureTests(unittest.TestCase):
                 ("click", 'button[type="submit"]'),
                 ("navigation_exit", "commit", 2468),
                 ("wait_for_selector", 'select[name="indate"]', "attached", 2468),
+            ],
+        )
+
+    def test_initial_goto_retries_with_https_after_http_timeout(self) -> None:
+        target = TargetConfig(
+            id="seoulmetro",
+            name="서울교통공사",
+            url="http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+            enabled=True,
+            selection_mode="seoulmetro_select",
+            capture_selector="#contents",
+            wait_selector="#view_date",
+            submit_selector="a[href*='document.searchForm.submit']",
+            initial_wait_until="commit",
+            submit_wait_until="commit",
+        )
+        page = RecordingPage(goto_side_effects=[TimeoutError("timeout"), None])
+        service = PlaywrightCaptureService(timeout_ms=1357)
+
+        asyncio.run(service._goto_target_page(page, target))
+
+        self.assertEqual(
+            page.calls,
+            [
+                (
+                    "goto",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    "commit",
+                    1357,
+                ),
+                (
+                    "goto",
+                    "https://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    "commit",
+                    1357,
+                ),
             ],
         )
 
