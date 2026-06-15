@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -90,6 +92,9 @@ def should_retry_with_https_fallback(url: str, error: Exception) -> bool:
 
 SEOULMETRO_TABLE_SELECTOR = "#contents .tbl-type1"
 SEOULMETRO_BOTTOM_MARKERS = ("9호선", "주의사항")
+GOTO_RETRY_DELAY_SECONDS = 3
+
+logger = logging.getLogger(__name__)
 
 
 class PlaywrightCaptureService:
@@ -159,10 +164,34 @@ class PlaywrightCaptureService:
             )
         except Exception as exc:
             fallback_url = https_fallback_url(target.url)
-            if fallback_url is None or not should_retry_with_https_fallback(target.url, exc):
+            if should_retry_with_https_fallback(target.url, exc) and fallback_url is not None:
+                logger.warning(
+                    "Initial goto timed out for %s at %s; retrying with fallback URL %s (%s)",
+                    target.id,
+                    target.url,
+                    fallback_url,
+                    exc.__class__.__name__,
+                )
+                await page.goto(
+                    fallback_url,
+                    wait_until=wait_until,
+                    timeout=self.timeout_ms,
+                )
+                return
+
+            if exc.__class__.__name__ != "TimeoutError":
                 raise
+
+            logger.warning(
+                "Initial goto timed out for %s at %s; retrying same URL after %ss (%s)",
+                target.id,
+                target.url,
+                GOTO_RETRY_DELAY_SECONDS,
+                exc.__class__.__name__,
+            )
+            await asyncio.sleep(GOTO_RETRY_DELAY_SECONDS)
             await page.goto(
-                fallback_url,
+                target.url,
                 wait_until=wait_until,
                 timeout=self.timeout_ms,
             )

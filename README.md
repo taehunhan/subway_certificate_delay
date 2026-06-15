@@ -18,9 +18,10 @@ Python program that captures the summary delay certificate pages for selected su
    `python3 main.py --no-email`
    `python3 main.py --date 2026-05-12`
 6. Or run it from `cron`.
-   `0 9 * * 1-5 cd /path/to/subway_certificate_delay && /usr/bin/env python3 main.py`
+   `15 10 * * 1-5 cd /path/to/subway_certificate_delay && /usr/bin/env python3 main.py`
 
 ## Cron notes
 
 - `cron` registration and execution time are managed outside this repository.
+- `10:15 KST` is the recommended weekday run time to avoid the post-commute spike that can affect operator websites.
 - Keep the SMTP variables available in the cron environment, or source them before `python3 main.py`.

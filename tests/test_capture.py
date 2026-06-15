@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import date
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from subway_delay.capture import (
+    GOTO_RETRY_DELAY_SECONDS,
     SEOULMETRO_BOTTOM_MARKERS,
     SEOULMETRO_TABLE_SELECTOR,
     PlaywrightCaptureService,
@@ -205,6 +206,44 @@ class KorailCaptureTests(unittest.TestCase):
             ],
         )
 
+    def test_initial_goto_retries_same_https_url_after_timeout(self) -> None:
+        target = TargetConfig(
+            id="korail",
+            name="코레일",
+            url="https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+            enabled=True,
+            selection_mode="korail_select",
+            capture_selector="div.container",
+            wait_selector='select[name="indate"]',
+            submit_selector='button[type="submit"]',
+            initial_wait_until="commit",
+            submit_wait_until="commit",
+        )
+        page = RecordingPage(goto_side_effects=[TimeoutError("timeout"), None])
+        service = PlaywrightCaptureService(timeout_ms=1357)
+
+        with patch("subway_delay.capture.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+            asyncio.run(service._goto_target_page(page, target))
+
+        sleep_mock.assert_awaited_once_with(GOTO_RETRY_DELAY_SECONDS)
+        self.assertEqual(
+            page.calls,
+            [
+                (
+                    "goto",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                    "commit",
+                    1357,
+                ),
+                (
+                    "goto",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                    "commit",
+                    1357,
+                ),
+            ],
+        )
+
     def test_initial_goto_retries_with_https_after_http_timeout(self) -> None:
         target = TargetConfig(
             id="seoulmetro",
@@ -221,8 +260,10 @@ class KorailCaptureTests(unittest.TestCase):
         page = RecordingPage(goto_side_effects=[TimeoutError("timeout"), None])
         service = PlaywrightCaptureService(timeout_ms=1357)
 
-        asyncio.run(service._goto_target_page(page, target))
+        with patch("subway_delay.capture.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+            asyncio.run(service._goto_target_page(page, target))
 
+        sleep_mock.assert_not_awaited()
         self.assertEqual(
             page.calls,
             [
@@ -235,6 +276,39 @@ class KorailCaptureTests(unittest.TestCase):
                 (
                     "goto",
                     "https://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    "commit",
+                    1357,
+                ),
+            ],
+        )
+
+    def test_initial_goto_does_not_retry_on_non_timeout_error(self) -> None:
+        target = TargetConfig(
+            id="korail",
+            name="코레일",
+            url="https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+            enabled=True,
+            selection_mode="korail_select",
+            capture_selector="div.container",
+            wait_selector='select[name="indate"]',
+            submit_selector='button[type="submit"]',
+            initial_wait_until="commit",
+            submit_wait_until="commit",
+        )
+        page = RecordingPage(goto_side_effects=[RuntimeError("boom")])
+        service = PlaywrightCaptureService(timeout_ms=1357)
+
+        with patch("subway_delay.capture.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(service._goto_target_page(page, target))
+
+        sleep_mock.assert_not_awaited()
+        self.assertEqual(
+            page.calls,
+            [
+                (
+                    "goto",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
                     "commit",
                     1357,
                 ),
