@@ -3,15 +3,22 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import date
+from email.message import Message
 from unittest.mock import AsyncMock, patch
 
 from subway_delay.capture import (
     GOTO_RETRY_DELAY_SECONDS,
+    KORAIL_DATE_SELECTOR,
+    KORAIL_TABLE_SELECTOR,
     SEOULMETRO_BOTTOM_MARKERS,
     SEOULMETRO_TABLE_SELECTOR,
     PlaywrightCaptureService,
+    build_korail_form_data,
+    fetch_korail_html_pair,
     https_fallback_url,
+    inject_base_href,
     initial_navigation_wait_until,
+    korail_base_href,
     should_retry_with_https_fallback,
     submit_navigation_wait_until,
 )
@@ -84,6 +91,9 @@ class RecordingPage:
             if side_effect is not None:
                 raise side_effect
 
+    async def set_content(self, html: str, *, wait_until: str) -> None:
+        self.calls.append(("set_content", html, wait_until))
+
     def locator(self, selector: str) -> RecordingLocator:
         self.calls.append(("locator", selector))
         return RecordingLocator(self, selector)
@@ -115,6 +125,33 @@ class RecordingPage:
 
 class TimeoutError(Exception):
     pass
+
+
+class FakeResponse:
+    def __init__(self, body: str, charset: str = "utf-8") -> None:
+        self._body = body.encode(charset)
+        self.headers = Message()
+        self.headers["Content-Type"] = f"text/html; charset={charset}"
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class FakeOpener:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[object, float | None]] = []
+        self.addheaders: list[tuple[str, str]] = []
+
+    def open(self, request, timeout: float | None = None):
+        self.calls.append((request, timeout))
+        return self.responses.pop(0)
 
 
 class CaptureNavigationTests(unittest.TestCase):
@@ -173,38 +210,128 @@ class CaptureNavigationTests(unittest.TestCase):
             )
         )
 
+    def test_inject_base_href_inserts_tag_before_head_close(self) -> None:
+        html = "<html><head><title>Korail</title></head><body></body></html>"
+
+        self.assertEqual(
+            inject_base_href(html, "https://info.korail.com/mbs/www/neo/delay/"),
+            '<html><head><title>Korail</title><base href="https://info.korail.com/mbs/www/neo/delay/"></head><body></body></html>',
+        )
+
+    def test_korail_base_href_returns_directory_url(self) -> None:
+        self.assertEqual(
+            korail_base_href("https://info.korail.com/mbs/www/neo/delay/delaylist.jsp"),
+            "https://info.korail.com/mbs/www/neo/delay/",
+        )
+
+    def test_build_korail_form_data_encodes_indate(self) -> None:
+        self.assertEqual(
+            build_korail_form_data(date(2026, 7, 1)),
+            b"indate=2026-07-01",
+        )
+
 
 class KorailCaptureTests(unittest.TestCase):
-    def test_capture_korail_submits_with_configured_wait_until(self) -> None:
+    def test_fetch_korail_html_pair_uses_get_then_post(self) -> None:
+        opener = FakeOpener(
+            responses=[
+                FakeResponse("<html><head></head><body>initial</body></html>"),
+                FakeResponse("<html><head></head><body>selected</body></html>"),
+            ]
+        )
+
+        initial_html, selected_html = fetch_korail_html_pair(
+            url="https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+            capture_date=date(2026, 7, 1),
+            timeout_seconds=12.5,
+            opener=opener,
+        )
+
+        self.assertEqual(initial_html, "<html><head></head><body>initial</body></html>")
+        self.assertEqual(selected_html, "<html><head></head><body>selected</body></html>")
+        self.assertEqual(len(opener.calls), 2)
+        get_request, get_timeout = opener.calls[0]
+        post_request, post_timeout = opener.calls[1]
+        self.assertEqual(get_request.get_method(), "GET")
+        self.assertEqual(get_request.full_url, "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp")
+        self.assertIsNone(get_request.data)
+        self.assertEqual(get_timeout, 12.5)
+        self.assertEqual(post_request.get_method(), "POST")
+        self.assertEqual(post_request.full_url, "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp")
+        self.assertEqual(post_request.data, b"indate=2026-07-01")
+        self.assertEqual(post_timeout, 12.5)
+
+    def test_capture_korail_uses_set_content_without_goto(self) -> None:
         target = TargetConfig(
             id="korail",
             name="코레일",
-            url="https://example.com",
+            url="https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
             enabled=True,
             selection_mode="korail_select",
             capture_selector="div.container",
-            wait_selector='select[name="indate"]',
+            wait_selector=KORAIL_DATE_SELECTOR,
             submit_selector='button[type="submit"]',
             initial_wait_until="commit",
             submit_wait_until="commit",
         )
         page = RecordingPage()
         service = PlaywrightCaptureService(timeout_ms=2468)
+        service._wait_for_korail_capture_ready = AsyncMock(
+            side_effect=lambda page_arg, capture_date: page_arg.calls.append(
+                ("korail_ready", capture_date.isoformat())
+            )
+        )
 
-        asyncio.run(service._capture_korail(page, target, capture_date=date(2026, 6, 3)))
+        with patch(
+            "subway_delay.capture.asyncio.to_thread",
+            new=AsyncMock(
+                return_value=(
+                    "<html><head></head><body>initial</body></html>",
+                    "<html><head></head><body>selected</body></html>",
+                )
+            ),
+        ):
+            asyncio.run(service._capture_korail(page, target, capture_date=date(2026, 7, 1)))
 
         self.assertEqual(
             page.calls,
             [
-                ("select_option", 'select[name="indate"]', "2026-06-03"),
-                ("expect_navigation", "commit", 2468),
-                ("navigation_enter", "commit", 2468),
-                ("locator", 'button[type="submit"]'),
-                ("click", 'button[type="submit"]'),
-                ("navigation_exit", "commit", 2468),
-                ("wait_for_selector", 'select[name="indate"]', "attached", 2468),
+                (
+                    "set_content",
+                    '<html><head><base href="https://info.korail.com/mbs/www/neo/delay/"></head><body>initial</body></html>',
+                    "domcontentloaded",
+                ),
+                ("wait_for_selector", KORAIL_DATE_SELECTOR, "attached", 2468),
+                (
+                    "set_content",
+                    '<html><head><base href="https://info.korail.com/mbs/www/neo/delay/"></head><body>selected</body></html>',
+                    "domcontentloaded",
+                ),
+                ("korail_ready", "2026-07-01"),
             ],
         )
+        self.assertNotIn(("goto",), [call[:1] for call in page.calls])
+
+    def test_wait_for_korail_capture_ready_waits_for_selector_and_selected_date(self) -> None:
+        page = RecordingPage()
+        service = PlaywrightCaptureService(timeout_ms=2468)
+
+        asyncio.run(service._wait_for_korail_capture_ready(page, date(2026, 7, 1)))
+
+        self.assertEqual(page.calls[0], ("wait_for_selector", KORAIL_DATE_SELECTOR, "attached", 2468))
+        self.assertEqual(page.calls[1], ("wait_for_selector", KORAIL_TABLE_SELECTOR, "attached", 2468))
+        call_name, expression, arg, timeout = page.calls[2]
+        self.assertEqual(call_name, "wait_for_function")
+        self.assertIn("select.value === captureDate", expression)
+        self.assertEqual(
+            arg,
+            {
+                "selector": KORAIL_DATE_SELECTOR,
+                "captureDate": "2026-07-01",
+                "tableSelector": KORAIL_TABLE_SELECTOR,
+            },
+        )
+        self.assertEqual(timeout, 2468)
 
     def test_initial_goto_retries_same_https_url_after_timeout(self) -> None:
         target = TargetConfig(

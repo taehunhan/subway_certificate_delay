@@ -4,8 +4,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlencode, urljoin
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from subway_delay.config import TargetConfig
 
@@ -90,6 +93,56 @@ def should_retry_with_https_fallback(url: str, error: Exception) -> bool:
     return https_fallback_url(url) is not None and error.__class__.__name__ == "TimeoutError"
 
 
+def korail_base_href(url: str) -> str:
+    return urljoin(url, ".")
+
+
+def build_korail_form_data(capture_date: date) -> bytes:
+    return urlencode({"indate": capture_date.isoformat()}).encode("utf-8")
+
+
+def inject_base_href(html: str, base_href: str) -> str:
+    if "<base " in html:
+        return html
+
+    head_close_index = html.find("</head>")
+    base_tag = f'<base href="{base_href}">'
+    if head_close_index != -1:
+        return html[:head_close_index] + base_tag + html[head_close_index:]
+    return base_tag + html
+
+
+def fetch_korail_html_pair(
+    *,
+    url: str,
+    capture_date: date,
+    timeout_seconds: float,
+    opener=None,
+) -> tuple[str, str]:
+    korail_opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
+    korail_opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+
+    initial_request = Request(url, method="GET")
+    initial_html = _read_response_text(korail_opener.open(initial_request, timeout=timeout_seconds))
+
+    post_request = Request(
+        url,
+        data=build_korail_form_data(capture_date),
+        method="POST",
+    )
+    post_request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    selected_html = _read_response_text(korail_opener.open(post_request, timeout=timeout_seconds))
+    return initial_html, selected_html
+
+
+def _read_response_text(response) -> str:
+    with response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+KORAIL_DATE_SELECTOR = 'select[name="indate"]'
+KORAIL_TABLE_SELECTOR = ".table-responsive table"
 SEOULMETRO_TABLE_SELECTOR = "#contents .tbl-type1"
 SEOULMETRO_BOTTOM_MARKERS = ("9호선", "주의사항")
 GOTO_RETRY_DELAY_SECONDS = 3
@@ -121,13 +174,16 @@ class PlaywrightCaptureService:
             )
             page = await context.new_page()
             try:
-                await self._goto_target_page(page, target)
-                await page.wait_for_selector(
-                    target.wait_selector,
-                    state="attached",
-                    timeout=self.timeout_ms,
-                )
-                await self._apply_date_selection(page, target, capture_date)
+                if target.selection_mode == "korail_select":
+                    await self._capture_korail(page, target, capture_date)
+                else:
+                    await self._goto_target_page(page, target)
+                    await page.wait_for_selector(
+                        target.wait_selector,
+                        state="attached",
+                        timeout=self.timeout_ms,
+                    )
+                    await self._apply_date_selection(page, target, capture_date)
                 await page.wait_for_selector(target.capture_selector, timeout=self.timeout_ms)
                 await page.locator(target.capture_selector).screenshot(path=str(destination))
             finally:
@@ -197,11 +253,56 @@ class PlaywrightCaptureService:
             )
 
     async def _capture_korail(self, page, target: TargetConfig, capture_date: date) -> None:
-        await page.select_option('select[name="indate"]', value=capture_date.isoformat())
-        await self._submit_target_form(page, target)
+        initial_html, selected_html = await asyncio.to_thread(
+            fetch_korail_html_pair,
+            url=target.url,
+            capture_date=capture_date,
+            timeout_seconds=self.timeout_ms / 1000,
+        )
+        base_href = korail_base_href(target.url)
+
+        await page.set_content(
+            inject_base_href(initial_html, base_href),
+            wait_until="domcontentloaded",
+        )
         await page.wait_for_selector(
-            target.wait_selector,
+            KORAIL_DATE_SELECTOR,
             state="attached",
+            timeout=self.timeout_ms,
+        )
+
+        await page.set_content(
+            inject_base_href(selected_html, base_href),
+            wait_until="domcontentloaded",
+        )
+        await self._wait_for_korail_capture_ready(page, capture_date)
+
+    async def _wait_for_korail_capture_ready(self, page, capture_date: date) -> None:
+        await page.wait_for_selector(
+            KORAIL_DATE_SELECTOR,
+            state="attached",
+            timeout=self.timeout_ms,
+        )
+        await page.wait_for_selector(
+            KORAIL_TABLE_SELECTOR,
+            state="attached",
+            timeout=self.timeout_ms,
+        )
+        await page.wait_for_function(
+            """({ selector, captureDate, tableSelector }) => {
+                const select = document.querySelector(selector);
+                const table = document.querySelector(tableSelector);
+                return Boolean(
+                    select &&
+                    select.value === captureDate &&
+                    table
+                );
+            }""",
+            arg={
+                "selector": KORAIL_DATE_SELECTOR,
+                "captureDate": capture_date.isoformat(),
+                "tableSelector": KORAIL_TABLE_SELECTOR,
+            },
             timeout=self.timeout_ms,
         )
 
