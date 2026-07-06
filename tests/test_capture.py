@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import date
-from email.message import Message
 from unittest.mock import AsyncMock, patch
 
 from subway_delay.capture import (
@@ -127,31 +126,38 @@ class TimeoutError(Exception):
     pass
 
 
-class FakeResponse:
-    def __init__(self, body: str, charset: str = "utf-8") -> None:
-        self._body = body.encode(charset)
-        self.headers = Message()
-        self.headers["Content-Type"] = f"text/html; charset={charset}"
+class FakeAPIResponse:
+    def __init__(self, body: str, *, ok: bool = True, status: int = 200) -> None:
+        self._body = body
+        self.ok = ok
+        self.status = status
 
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-    def read(self) -> bytes:
+    async def text(self) -> str:
         return self._body
 
 
-class FakeOpener:
-    def __init__(self, responses: list[FakeResponse]) -> None:
+class FakeAPIRequestContext:
+    def __init__(self, responses: list[FakeAPIResponse]) -> None:
         self.responses = responses
-        self.calls: list[tuple[object, float | None]] = []
-        self.addheaders: list[tuple[str, str]] = []
+        self.calls: list[tuple] = []
 
-    def open(self, request, timeout: float | None = None):
-        self.calls.append((request, timeout))
+    async def get(self, url: str, *, timeout: int | None = None):
+        self.calls.append(("get", url, timeout))
         return self.responses.pop(0)
+
+    async def post(
+        self,
+        url: str,
+        *,
+        data=None,
+        headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+    ):
+        self.calls.append(("post", url, data, headers, timeout))
+        return self.responses.pop(0)
+
+    async def dispose(self) -> None:
+        self.calls.append(("dispose",))
 
 
 class CaptureNavigationTests(unittest.TestCase):
@@ -233,33 +239,41 @@ class CaptureNavigationTests(unittest.TestCase):
 
 class KorailCaptureTests(unittest.TestCase):
     def test_fetch_korail_html_pair_uses_get_then_post(self) -> None:
-        opener = FakeOpener(
+        request_context = FakeAPIRequestContext(
             responses=[
-                FakeResponse("<html><head></head><body>initial</body></html>"),
-                FakeResponse("<html><head></head><body>selected</body></html>"),
+                FakeAPIResponse("<html><head></head><body>initial</body></html>"),
+                FakeAPIResponse("<html><head></head><body>selected</body></html>"),
             ]
         )
 
-        initial_html, selected_html = fetch_korail_html_pair(
-            url="https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
-            capture_date=date(2026, 7, 1),
-            timeout_seconds=12.5,
-            opener=opener,
+        initial_html, selected_html = asyncio.run(
+            fetch_korail_html_pair(
+                request_context=request_context,
+                url="https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                capture_date=date(2026, 7, 1),
+                timeout_ms=12_500,
+            )
         )
 
         self.assertEqual(initial_html, "<html><head></head><body>initial</body></html>")
         self.assertEqual(selected_html, "<html><head></head><body>selected</body></html>")
-        self.assertEqual(len(opener.calls), 2)
-        get_request, get_timeout = opener.calls[0]
-        post_request, post_timeout = opener.calls[1]
-        self.assertEqual(get_request.get_method(), "GET")
-        self.assertEqual(get_request.full_url, "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp")
-        self.assertIsNone(get_request.data)
-        self.assertEqual(get_timeout, 12.5)
-        self.assertEqual(post_request.get_method(), "POST")
-        self.assertEqual(post_request.full_url, "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp")
-        self.assertEqual(post_request.data, b"indate=2026-07-01")
-        self.assertEqual(post_timeout, 12.5)
+        self.assertEqual(
+            request_context.calls,
+            [
+                (
+                    "get",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                    12_500,
+                ),
+                (
+                    "post",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                    b"indate=2026-07-01",
+                    {"Content-Type": "application/x-www-form-urlencoded"},
+                    12_500,
+                ),
+            ],
+        )
 
     def test_capture_korail_uses_set_content_without_goto(self) -> None:
         target = TargetConfig(
@@ -275,6 +289,12 @@ class KorailCaptureTests(unittest.TestCase):
             submit_wait_until="commit",
         )
         page = RecordingPage()
+        request_context = FakeAPIRequestContext(
+            responses=[
+                FakeAPIResponse("<html><head></head><body>initial</body></html>"),
+                FakeAPIResponse("<html><head></head><body>selected</body></html>"),
+            ]
+        )
         service = PlaywrightCaptureService(timeout_ms=2468)
         service._wait_for_korail_capture_ready = AsyncMock(
             side_effect=lambda page_arg, capture_date: page_arg.calls.append(
@@ -282,16 +302,14 @@ class KorailCaptureTests(unittest.TestCase):
             )
         )
 
-        with patch(
-            "subway_delay.capture.asyncio.to_thread",
-            new=AsyncMock(
-                return_value=(
-                    "<html><head></head><body>initial</body></html>",
-                    "<html><head></head><body>selected</body></html>",
-                )
-            ),
-        ):
-            asyncio.run(service._capture_korail(page, target, capture_date=date(2026, 7, 1)))
+        asyncio.run(
+            service._capture_korail(
+                page,
+                target,
+                capture_date=date(2026, 7, 1),
+                request_context=request_context,
+            )
+        )
 
         self.assertEqual(
             page.calls,
@@ -308,6 +326,23 @@ class KorailCaptureTests(unittest.TestCase):
                     "domcontentloaded",
                 ),
                 ("korail_ready", "2026-07-01"),
+            ],
+        )
+        self.assertEqual(
+            request_context.calls,
+            [
+                (
+                    "get",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                    2468,
+                ),
+                (
+                    "post",
+                    "https://info.korail.com/mbs/www/neo/delay/delaylist.jsp",
+                    b"indate=2026-07-01",
+                    {"Content-Type": "application/x-www-form-urlencoded"},
+                    2468,
+                ),
             ],
         )
         self.assertNotIn(("goto",), [call[:1] for call in page.calls])

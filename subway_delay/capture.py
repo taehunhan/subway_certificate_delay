@@ -4,11 +4,9 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
-from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlencode, urljoin
-from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from subway_delay.config import TargetConfig
 
@@ -112,33 +110,33 @@ def inject_base_href(html: str, base_href: str) -> str:
     return base_tag + html
 
 
-def fetch_korail_html_pair(
+async def fetch_korail_html_pair(
     *,
+    request_context,
     url: str,
     capture_date: date,
-    timeout_seconds: float,
-    opener=None,
+    timeout_ms: int,
 ) -> tuple[str, str]:
-    korail_opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
-    korail_opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+    initial_response = await request_context.get(
+        url,
+        timeout=timeout_ms,
+    )
+    initial_html = await _read_korail_response_text(initial_response, url=url, method="GET")
 
-    initial_request = Request(url, method="GET")
-    initial_html = _read_response_text(korail_opener.open(initial_request, timeout=timeout_seconds))
-
-    post_request = Request(
+    selected_response = await request_context.post(
         url,
         data=build_korail_form_data(capture_date),
-        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout_ms,
     )
-    post_request.add_header("Content-Type", "application/x-www-form-urlencoded")
-    selected_html = _read_response_text(korail_opener.open(post_request, timeout=timeout_seconds))
+    selected_html = await _read_korail_response_text(selected_response, url=url, method="POST")
     return initial_html, selected_html
 
 
-def _read_response_text(response) -> str:
-    with response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
+async def _read_korail_response_text(response, *, url: str, method: str) -> str:
+    if not response.ok:
+        raise ValueError(f"Korail {method} request failed with status {response.status} for {url}.")
+    return await response.text()
 
 
 KORAIL_DATE_SELECTOR = 'select[name="indate"]'
@@ -173,9 +171,15 @@ class PlaywrightCaptureService:
                 ignore_https_errors=True,
             )
             page = await context.new_page()
+            request_context = None
             try:
                 if target.selection_mode == "korail_select":
-                    await self._capture_korail(page, target, capture_date)
+                    request_context = await playwright.request.new_context(
+                        ignore_https_errors=True,
+                        extra_http_headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=self.timeout_ms,
+                    )
+                    await self._capture_korail(page, target, capture_date, request_context)
                 else:
                     await self._goto_target_page(page, target)
                     await page.wait_for_selector(
@@ -187,13 +191,12 @@ class PlaywrightCaptureService:
                 await page.wait_for_selector(target.capture_selector, timeout=self.timeout_ms)
                 await page.locator(target.capture_selector).screenshot(path=str(destination))
             finally:
+                if request_context is not None:
+                    await request_context.dispose()
                 await context.close()
                 await browser.close()
 
     async def _apply_date_selection(self, page, target: TargetConfig, capture_date: date) -> None:
-        if target.selection_mode == "korail_select":
-            await self._capture_korail(page, target, capture_date)
-            return
         if target.selection_mode == "seoulmetro_select":
             await self._capture_seoulmetro(page, target, capture_date)
             return
@@ -252,12 +255,18 @@ class PlaywrightCaptureService:
                 timeout=self.timeout_ms,
             )
 
-    async def _capture_korail(self, page, target: TargetConfig, capture_date: date) -> None:
-        initial_html, selected_html = await asyncio.to_thread(
-            fetch_korail_html_pair,
+    async def _capture_korail(
+        self,
+        page,
+        target: TargetConfig,
+        capture_date: date,
+        request_context,
+    ) -> None:
+        initial_html, selected_html = await fetch_korail_html_pair(
+            request_context=request_context,
             url=target.url,
             capture_date=capture_date,
-            timeout_seconds=self.timeout_ms / 1000,
+            timeout_ms=self.timeout_ms,
         )
         base_href = korail_base_href(target.url)
 
