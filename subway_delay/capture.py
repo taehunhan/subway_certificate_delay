@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlencode, urljoin
@@ -27,12 +28,67 @@ class SelectOption:
     text: str
 
 
+class SelectOptionsHTMLParser(HTMLParser):
+    def __init__(self, select_identifier: str) -> None:
+        super().__init__()
+        self.select_identifier = select_identifier
+        self.options: list[SelectOption] = []
+        self._inside_target_select = False
+        self._select_depth = 0
+        self._current_value: str | None = None
+        self._current_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr_map = dict(attrs)
+        if tag == "select":
+            if self._inside_target_select:
+                self._select_depth += 1
+                return
+
+            if (
+                attr_map.get("id") == self.select_identifier
+                or attr_map.get("name") == self.select_identifier
+            ):
+                self._inside_target_select = True
+                self._select_depth = 1
+            return
+
+        if tag == "option" and self._inside_target_select:
+            self._current_value = attr_map.get("value") or ""
+            self._current_text = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "option" and self._inside_target_select and self._current_value is not None:
+            self.options.append(
+                SelectOption(value=self._current_value, text="".join(self._current_text).strip())
+            )
+            self._current_value = None
+            self._current_text = []
+            return
+
+        if tag == "select" and self._inside_target_select:
+            self._select_depth -= 1
+            if self._select_depth == 0:
+                self._inside_target_select = False
+
+    def handle_data(self, data: str) -> None:
+        if self._inside_target_select and self._current_value is not None:
+            self._current_text.append(data)
+
+
 def option_value_for_date(options: list[SelectOption], target_date: date) -> str:
     target_text = target_date.isoformat()
     for option in options:
         if target_text in option.text:
             return option.value
     raise ValueError(f"Could not find an option containing date {target_text}.")
+
+
+def extract_select_options(html: str, select_identifier: str) -> list[SelectOption]:
+    parser = SelectOptionsHTMLParser(select_identifier)
+    parser.feed(html)
+    parser.close()
+    return parser.options
 
 
 def metro9_tab_selector(target_date: date) -> str:
@@ -99,6 +155,10 @@ def build_korail_form_data(capture_date: date) -> bytes:
     return urlencode({"indate": capture_date.isoformat()}).encode("utf-8")
 
 
+def build_seoulmetro_form_data(view_date_value: str) -> bytes:
+    return urlencode({"view_date": view_date_value}).encode("utf-8")
+
+
 def inject_base_href(html: str, base_href: str) -> str:
     if "<base " in html:
         return html
@@ -121,7 +181,7 @@ async def fetch_korail_html_pair(
         url,
         timeout=timeout_ms,
     )
-    initial_html = await _read_korail_response_text(initial_response, url=url, method="GET")
+    initial_html = await _read_response_text(initial_response, url=url, method="GET")
 
     selected_response = await request_context.post(
         url,
@@ -129,13 +189,37 @@ async def fetch_korail_html_pair(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=timeout_ms,
     )
-    selected_html = await _read_korail_response_text(selected_response, url=url, method="POST")
+    selected_html = await _read_response_text(selected_response, url=url, method="POST")
     return initial_html, selected_html
 
 
-async def _read_korail_response_text(response, *, url: str, method: str) -> str:
+async def fetch_seoulmetro_html_pair(
+    *,
+    request_context,
+    url: str,
+    capture_date: date,
+    timeout_ms: int,
+) -> tuple[str, str]:
+    initial_response = await request_context.get(
+        url,
+        timeout=timeout_ms,
+    )
+    initial_html = await _read_response_text(initial_response, url=url, method="GET")
+    selected_value = option_value_for_date(extract_select_options(initial_html, "view_date"), capture_date)
+
+    selected_response = await request_context.post(
+        url,
+        data=build_seoulmetro_form_data(selected_value),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout_ms,
+    )
+    selected_html = await _read_response_text(selected_response, url=url, method="POST")
+    return initial_html, selected_html
+
+
+async def _read_response_text(response, *, url: str, method: str) -> str:
     if not response.ok:
-        raise ValueError(f"Korail {method} request failed with status {response.status} for {url}.")
+        raise ValueError(f"{method} request failed with status {response.status} for {url}.")
     return await response.text()
 
 
@@ -173,13 +257,12 @@ class PlaywrightCaptureService:
             page = await context.new_page()
             request_context = None
             try:
-                if target.selection_mode == "korail_select":
-                    request_context = await playwright.request.new_context(
-                        ignore_https_errors=True,
-                        extra_http_headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=self.timeout_ms,
-                    )
-                    await self._capture_korail(page, target, capture_date, request_context)
+                if target.selection_mode in {"korail_select", "seoulmetro_select"}:
+                    request_context = await self._new_request_context(playwright)
+                    if target.selection_mode == "korail_select":
+                        await self._capture_korail(page, target, capture_date, request_context)
+                    else:
+                        await self._capture_seoulmetro(page, target, capture_date, request_context)
                 else:
                     await self._goto_target_page(page, target)
                     await page.wait_for_selector(
@@ -196,10 +279,14 @@ class PlaywrightCaptureService:
                 await context.close()
                 await browser.close()
 
+    async def _new_request_context(self, playwright):
+        return await playwright.request.new_context(
+            ignore_https_errors=True,
+            extra_http_headers={"User-Agent": "Mozilla/5.0"},
+            timeout=self.timeout_ms,
+        )
+
     async def _apply_date_selection(self, page, target: TargetConfig, capture_date: date) -> None:
-        if target.selection_mode == "seoulmetro_select":
-            await self._capture_seoulmetro(page, target, capture_date)
-            return
         if target.selection_mode == "metro9_tab":
             await self._capture_metro9(page, target, capture_date)
             return
@@ -315,21 +402,25 @@ class PlaywrightCaptureService:
             timeout=self.timeout_ms,
         )
 
-    async def _capture_seoulmetro(self, page, target: TargetConfig, capture_date: date) -> None:
-        options = await page.locator("#view_date option").evaluate_all(
-            """(elements) => elements.map((element) => ({
-                value: element.value,
-                text: (element.textContent || "").trim()
-            }))"""
+    async def _capture_seoulmetro(
+        self,
+        page,
+        target: TargetConfig,
+        capture_date: date,
+        request_context,
+    ) -> None:
+        _initial_html, selected_html = await fetch_seoulmetro_html_pair(
+            request_context=request_context,
+            url=target.url,
+            capture_date=capture_date,
+            timeout_ms=self.timeout_ms,
         )
-        selected_value = option_value_for_date(
-            [SelectOption(value=item["value"], text=item["text"]) for item in options],
-            capture_date,
+        base_href = korail_base_href(target.url)
+
+        await page.set_content(
+            inject_base_href(selected_html, base_href),
+            wait_until="domcontentloaded",
         )
-        await page.select_option("#view_date", value=selected_value)
-        if not target.submit_selector:
-            raise ValueError("seoulmetro_select requires submit_selector.")
-        await self._submit_target_form(page, target)
         await self._wait_for_seoulmetro_capture_ready(page, target)
 
     async def _submit_target_form(self, page, target: TargetConfig) -> None:

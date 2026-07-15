@@ -13,7 +13,10 @@ from subway_delay.capture import (
     SEOULMETRO_TABLE_SELECTOR,
     PlaywrightCaptureService,
     build_korail_form_data,
+    build_seoulmetro_form_data,
+    extract_select_options,
     fetch_korail_html_pair,
+    fetch_seoulmetro_html_pair,
     https_fallback_url,
     inject_base_href,
     initial_navigation_wait_until,
@@ -234,6 +237,28 @@ class CaptureNavigationTests(unittest.TestCase):
         self.assertEqual(
             build_korail_form_data(date(2026, 7, 1)),
             b"indate=2026-07-01",
+        )
+
+    def test_build_seoulmetro_form_data_encodes_view_date(self) -> None:
+        self.assertEqual(build_seoulmetro_form_data("14"), b"view_date=14")
+
+    def test_extract_select_options_reads_target_select(self) -> None:
+        html = """
+        <html><body>
+            <select id="other">
+                <option value="x">ignore</option>
+            </select>
+            <select name="view_date" id="view_date">
+                <option value="0">금일 (2026-07-15)</option>
+                <option value="1">1일전 (2026-07-14)</option>
+            </select>
+        </body></html>
+        """
+
+        options = extract_select_options(html, "view_date")
+        self.assertEqual(
+            [(option.value, option.text) for option in options],
+            [("0", "금일 (2026-07-15)"), ("1", "1일전 (2026-07-14)")],
         )
 
 
@@ -479,11 +504,57 @@ class KorailCaptureTests(unittest.TestCase):
 
 
 class SeoulMetroCaptureTests(unittest.TestCase):
-    def test_capture_seoulmetro_submits_then_waits_for_ready_state(self) -> None:
+    def test_fetch_seoulmetro_html_pair_uses_get_then_post_with_matching_option(self) -> None:
+        request_context = FakeAPIRequestContext(
+            responses=[
+                FakeAPIResponse(
+                    """
+                    <html><body>
+                        <select name="view_date" id="view_date">
+                            <option value="0">금일 (2026-05-29)</option>
+                            <option value="1">1일전 (2026-05-28)</option>
+                        </select>
+                    </body></html>
+                    """
+                ),
+                FakeAPIResponse("<html><body>selected</body></html>"),
+            ]
+        )
+
+        initial_html, selected_html = asyncio.run(
+            fetch_seoulmetro_html_pair(
+                request_context=request_context,
+                url="http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                capture_date=date(2026, 5, 28),
+                timeout_ms=3210,
+            )
+        )
+
+        self.assertIn('option value="1"', initial_html)
+        self.assertEqual(selected_html, "<html><body>selected</body></html>")
+        self.assertEqual(
+            request_context.calls,
+            [
+                (
+                    "get",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    3210,
+                ),
+                (
+                    "post",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    b"view_date=1",
+                    {"Content-Type": "application/x-www-form-urlencoded"},
+                    3210,
+                ),
+            ],
+        )
+
+    def test_capture_seoulmetro_uses_set_content_without_goto(self) -> None:
         target = TargetConfig(
             id="seoulmetro",
             name="서울교통공사",
-            url="https://example.com",
+            url="http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
             enabled=True,
             selection_mode="seoulmetro_select",
             capture_selector="#contents",
@@ -492,10 +563,20 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             initial_wait_until="commit",
             submit_wait_until="commit",
         )
-        page = RecordingPage(
-            options=[
-                {"value": "0", "text": "금일 (2026-05-29)"},
-                {"value": "1", "text": "1일전 (2026-05-28)"},
+        page = RecordingPage()
+        request_context = FakeAPIRequestContext(
+            responses=[
+                FakeAPIResponse(
+                    """
+                    <html><body>
+                        <select name="view_date" id="view_date">
+                            <option value="0">금일 (2026-05-29)</option>
+                            <option value="1">1일전 (2026-05-28)</option>
+                        </select>
+                    </body></html>
+                    """
+                ),
+                FakeAPIResponse("<html><head></head><body>selected</body></html>"),
             ]
         )
         service = PlaywrightCaptureService(timeout_ms=3210)
@@ -505,22 +586,44 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             )
         )
 
-        asyncio.run(service._capture_seoulmetro(page, target, capture_date=date(2026, 5, 28)))
+        asyncio.run(
+            service._capture_seoulmetro(
+                page,
+                target,
+                capture_date=date(2026, 5, 28),
+                request_context=request_context,
+            )
+        )
 
         self.assertEqual(
             page.calls,
             [
-                ("locator", "#view_date option"),
-                ("evaluate_all", "#view_date option"),
-                ("select_option", "#view_date", "1"),
-                ("expect_navigation", "commit", 3210),
-                ("navigation_enter", "commit", 3210),
-                ("locator", "a[href*='document.searchForm.submit']"),
-                ("click", "a[href*='document.searchForm.submit']"),
-                ("navigation_exit", "commit", 3210),
+                (
+                    "set_content",
+                    '<html><head><base href="http://www.seoulmetro.co.kr/kr/"></head><body>selected</body></html>',
+                    "domcontentloaded",
+                ),
                 ("wait_ready", "#contents"),
             ],
         )
+        self.assertEqual(
+            request_context.calls,
+            [
+                (
+                    "get",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    3210,
+                ),
+                (
+                    "post",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    b"view_date=1",
+                    {"Content-Type": "application/x-www-form-urlencoded"},
+                    3210,
+                ),
+            ],
+        )
+        self.assertNotIn(("goto",), [call[:1] for call in page.calls])
 
     def test_wait_for_seoulmetro_capture_ready_waits_for_bottom_markers_then_height(self) -> None:
         target = TargetConfig(

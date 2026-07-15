@@ -29,6 +29,7 @@ targets:
     url: https://www.metro9.co.kr/prog/delayCrtf/kor/sub01_09/list.do
     enabled: true
     selection_mode: metro9_tab
+    initial_wait_until: commit
     capture_selector: "#tab_moType1"
     wait_selector: "#delayTmpl"
   - id: ui-line
