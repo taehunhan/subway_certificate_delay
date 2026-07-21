@@ -76,6 +76,21 @@ class RecordingNavigationContext:
         return False
 
 
+class RecordingRoute:
+    def __init__(self, page: "RecordingPage", url: str) -> None:
+        self.page = page
+        self.url = url
+
+    async def fulfill(
+        self,
+        *,
+        status: int,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> None:
+        self.page.calls.append(("fulfill", self.url, status, headers, body))
+
+
 class RecordingPage:
     def __init__(
         self,
@@ -85,9 +100,14 @@ class RecordingPage:
         self.options = options or []
         self.goto_side_effects = goto_side_effects or []
         self.calls: list[tuple] = []
+        self.route_handlers: list[tuple[str, object]] = []
 
     async def goto(self, url: str, *, wait_until: str, timeout: int | None = None) -> None:
         self.calls.append(("goto", url, wait_until, timeout))
+        for route_url, handler in list(self.route_handlers):
+            if route_url == url:
+                await handler(RecordingRoute(self, url))
+                break
         if self.goto_side_effects:
             side_effect = self.goto_side_effects.pop(0)
             if side_effect is not None:
@@ -99,6 +119,18 @@ class RecordingPage:
     def locator(self, selector: str) -> RecordingLocator:
         self.calls.append(("locator", selector))
         return RecordingLocator(self, selector)
+
+    async def route(self, url: str, handler) -> None:
+        self.calls.append(("route", url))
+        self.route_handlers.append((url, handler))
+
+    async def unroute(self, url: str, handler=None) -> None:
+        self.calls.append(("unroute", url))
+        self.route_handlers = [
+            (route_url, route_handler)
+            for route_url, route_handler in self.route_handlers
+            if not (route_url == url and (handler is None or route_handler is handler))
+        ]
 
     async def select_option(self, selector: str, value: str) -> None:
         self.calls.append(("select_option", selector, value))
@@ -550,7 +582,7 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             ],
         )
 
-    def test_capture_seoulmetro_uses_set_content_without_goto(self) -> None:
+    def test_capture_seoulmetro_uses_routed_document_load(self) -> None:
         target = TargetConfig(
             id="seoulmetro",
             name="서울교통공사",
@@ -598,11 +630,21 @@ class SeoulMetroCaptureTests(unittest.TestCase):
         self.assertEqual(
             page.calls,
             [
+                ("route", "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"),
                 (
-                    "set_content",
-                    '<html><head><base href="http://www.seoulmetro.co.kr/kr/"></head><body>selected</body></html>',
+                    "goto",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
                     "domcontentloaded",
+                    3210,
                 ),
+                (
+                    "fulfill",
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+                    200,
+                    {"Content-Type": "text/html; charset=UTF-8"},
+                    "<html><head></head><body>selected</body></html>",
+                ),
+                ("unroute", "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"),
                 ("wait_ready", "#contents"),
             ],
         )
@@ -623,7 +665,7 @@ class SeoulMetroCaptureTests(unittest.TestCase):
                 ),
             ],
         )
-        self.assertNotIn(("goto",), [call[:1] for call in page.calls])
+        self.assertNotIn(("set_content",), [call[:1] for call in page.calls])
 
     def test_wait_for_seoulmetro_capture_ready_waits_for_bottom_markers_then_height(self) -> None:
         target = TargetConfig(

@@ -286,6 +286,31 @@ class PlaywrightCaptureService:
             timeout=self.timeout_ms,
         )
 
+    async def _load_document_via_route(
+        self,
+        page,
+        *,
+        url: str,
+        html: str,
+        wait_until: str = "domcontentloaded",
+    ) -> None:
+        async def handle_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                headers={"Content-Type": "text/html; charset=UTF-8"},
+                body=html,
+            )
+
+        await page.route(url, handle_route)
+        try:
+            await page.goto(
+                url,
+                wait_until=wait_until,
+                timeout=self.timeout_ms,
+            )
+        finally:
+            await page.unroute(url, handle_route)
+
     async def _apply_date_selection(self, page, target: TargetConfig, capture_date: date) -> None:
         if target.selection_mode == "metro9_tab":
             await self._capture_metro9(page, target, capture_date)
@@ -415,10 +440,10 @@ class PlaywrightCaptureService:
             capture_date=capture_date,
             timeout_ms=self.timeout_ms,
         )
-        base_href = korail_base_href(target.url)
-
-        await page.set_content(
-            inject_base_href(selected_html, base_href),
+        await self._load_document_via_route(
+            page,
+            url=target.url,
+            html=selected_html,
             wait_until="domcontentloaded",
         )
         await self._wait_for_seoulmetro_capture_ready(page, target)
