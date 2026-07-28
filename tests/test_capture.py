@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import date
+from email.message import Message
 from unittest.mock import AsyncMock, patch
 
 from subway_delay.capture import (
@@ -193,6 +194,33 @@ class FakeAPIRequestContext:
 
     async def dispose(self) -> None:
         self.calls.append(("dispose",))
+
+
+class FakeResponse:
+    def __init__(self, body: str, charset: str = "utf-8") -> None:
+        self._body = body.encode(charset)
+        self.headers = Message()
+        self.headers["Content-Type"] = f"text/html; charset={charset}"
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class FakeOpener:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[object, float | None]] = []
+        self.addheaders: list[tuple[str, str]] = []
+
+    def open(self, request, timeout: float | None = None):
+        self.calls.append((request, timeout))
+        return self.responses.pop(0)
 
 
 class CaptureNavigationTests(unittest.TestCase):
@@ -537,9 +565,9 @@ class KorailCaptureTests(unittest.TestCase):
 
 class SeoulMetroCaptureTests(unittest.TestCase):
     def test_fetch_seoulmetro_html_pair_uses_get_then_post_with_matching_option(self) -> None:
-        request_context = FakeAPIRequestContext(
+        opener = FakeOpener(
             responses=[
-                FakeAPIResponse(
+                FakeResponse(
                     """
                     <html><body>
                         <select name="view_date" id="view_date">
@@ -549,38 +577,30 @@ class SeoulMetroCaptureTests(unittest.TestCase):
                     </body></html>
                     """
                 ),
-                FakeAPIResponse("<html><body>selected</body></html>"),
+                FakeResponse("<html><body>selected</body></html>"),
             ]
         )
 
-        initial_html, selected_html = asyncio.run(
-            fetch_seoulmetro_html_pair(
-                request_context=request_context,
-                url="http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
-                capture_date=date(2026, 5, 28),
-                timeout_ms=3210,
-            )
+        initial_html, selected_html = fetch_seoulmetro_html_pair(
+            url="http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+            capture_date=date(2026, 5, 28),
+            timeout_seconds=3.21,
+            opener=opener,
         )
 
         self.assertIn('option value="1"', initial_html)
         self.assertEqual(selected_html, "<html><body>selected</body></html>")
-        self.assertEqual(
-            request_context.calls,
-            [
-                (
-                    "get",
-                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
-                    3210,
-                ),
-                (
-                    "post",
-                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
-                    b"view_date=1",
-                    {"Content-Type": "application/x-www-form-urlencoded"},
-                    3210,
-                ),
-            ],
-        )
+        self.assertEqual(len(opener.calls), 2)
+        get_request, get_timeout = opener.calls[0]
+        post_request, post_timeout = opener.calls[1]
+        self.assertEqual(get_request.get_method(), "GET")
+        self.assertEqual(get_request.full_url, "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543")
+        self.assertIsNone(get_request.data)
+        self.assertEqual(get_timeout, 3.21)
+        self.assertEqual(post_request.get_method(), "POST")
+        self.assertEqual(post_request.full_url, "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543")
+        self.assertEqual(post_request.data, b"view_date=1")
+        self.assertEqual(post_timeout, 3.21)
 
     def test_capture_seoulmetro_uses_routed_document_load(self) -> None:
         target = TargetConfig(
@@ -596,21 +616,6 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             submit_wait_until="commit",
         )
         page = RecordingPage()
-        request_context = FakeAPIRequestContext(
-            responses=[
-                FakeAPIResponse(
-                    """
-                    <html><body>
-                        <select name="view_date" id="view_date">
-                            <option value="0">금일 (2026-05-29)</option>
-                            <option value="1">1일전 (2026-05-28)</option>
-                        </select>
-                    </body></html>
-                    """
-                ),
-                FakeAPIResponse("<html><head></head><body>selected</body></html>"),
-            ]
-        )
         service = PlaywrightCaptureService(timeout_ms=3210)
         service._wait_for_seoulmetro_capture_ready = AsyncMock(
             side_effect=lambda page_arg, target_arg: page_arg.calls.append(
@@ -618,14 +623,16 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             )
         )
 
-        asyncio.run(
-            service._capture_seoulmetro(
-                page,
-                target,
-                capture_date=date(2026, 5, 28),
-                request_context=request_context,
-            )
-        )
+        with patch(
+            "subway_delay.capture.asyncio.to_thread",
+            new=AsyncMock(
+                return_value=(
+                    "<html><body>initial</body></html>",
+                    "<html><head></head><body>selected</body></html>",
+                )
+            ),
+        ):
+            asyncio.run(service._capture_seoulmetro(page, target, capture_date=date(2026, 5, 28)))
 
         self.assertEqual(
             page.calls,
@@ -646,23 +653,6 @@ class SeoulMetroCaptureTests(unittest.TestCase):
                 ),
                 ("unroute", "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"),
                 ("wait_ready", "#contents"),
-            ],
-        )
-        self.assertEqual(
-            request_context.calls,
-            [
-                (
-                    "get",
-                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
-                    3210,
-                ),
-                (
-                    "post",
-                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
-                    b"view_date=1",
-                    {"Content-Type": "application/x-www-form-urlencoded"},
-                    3210,
-                ),
             ],
         )
         self.assertNotIn(("set_content",), [call[:1] for call in page.calls])

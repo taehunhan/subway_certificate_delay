@@ -13,7 +13,7 @@ Python program that captures the summary delay certificate pages for selected su
    `initial_wait_until` for the first `page.goto()`, `submit_wait_until` for submit navigation.
    If omitted, they default to `domcontentloaded` and `networkidle`. Use `commit` for flaky pages that time out before the DOM finishes loading.
    Korail is captured from server-rendered HTML fetched through a Playwright API request context and rendered locally in Playwright.
-   Seoul Metro is fetched the same way, then replayed through a routed document load so its original page assets and scripts render under the real URL.
+   Seoul Metro is fetched over standard HTTP, then replayed through a routed document load so its original page assets and scripts render under the real URL.
 4. Export SMTP variables.
    `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
 5. Run manually.

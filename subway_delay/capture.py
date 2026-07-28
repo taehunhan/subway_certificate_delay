@@ -4,10 +4,12 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
+from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlencode, urljoin
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from subway_delay.config import TargetConfig
 
@@ -193,27 +195,35 @@ async def fetch_korail_html_pair(
     return initial_html, selected_html
 
 
-async def fetch_seoulmetro_html_pair(
+def fetch_seoulmetro_html_pair(
     *,
-    request_context,
     url: str,
     capture_date: date,
-    timeout_ms: int,
+    timeout_seconds: float,
+    opener=None,
 ) -> tuple[str, str]:
-    initial_response = await request_context.get(
-        url,
-        timeout=timeout_ms,
+    metro_opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
+    metro_opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+
+    initial_request = Request(url, method="GET")
+    initial_html = _read_urllib_response_text(
+        metro_opener.open(initial_request, timeout=timeout_seconds),
+        url=url,
+        method="GET",
     )
-    initial_html = await _read_response_text(initial_response, url=url, method="GET")
     selected_value = option_value_for_date(extract_select_options(initial_html, "view_date"), capture_date)
 
-    selected_response = await request_context.post(
+    selected_request = Request(
         url,
         data=build_seoulmetro_form_data(selected_value),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=timeout_ms,
+        method="POST",
     )
-    selected_html = await _read_response_text(selected_response, url=url, method="POST")
+    selected_request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    selected_html = _read_urllib_response_text(
+        metro_opener.open(selected_request, timeout=timeout_seconds),
+        url=url,
+        method="POST",
+    )
     return initial_html, selected_html
 
 
@@ -221,6 +231,12 @@ async def _read_response_text(response, *, url: str, method: str) -> str:
     if not response.ok:
         raise ValueError(f"{method} request failed with status {response.status} for {url}.")
     return await response.text()
+
+
+def _read_urllib_response_text(response, *, url: str, method: str) -> str:
+    with response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
 
 
 KORAIL_DATE_SELECTOR = 'select[name="indate"]'
@@ -257,12 +273,11 @@ class PlaywrightCaptureService:
             page = await context.new_page()
             request_context = None
             try:
-                if target.selection_mode in {"korail_select", "seoulmetro_select"}:
+                if target.selection_mode == "korail_select":
                     request_context = await self._new_request_context(playwright)
-                    if target.selection_mode == "korail_select":
-                        await self._capture_korail(page, target, capture_date, request_context)
-                    else:
-                        await self._capture_seoulmetro(page, target, capture_date, request_context)
+                    await self._capture_korail(page, target, capture_date, request_context)
+                elif target.selection_mode == "seoulmetro_select":
+                    await self._capture_seoulmetro(page, target, capture_date)
                 else:
                     await self._goto_target_page(page, target)
                     await page.wait_for_selector(
@@ -432,13 +447,12 @@ class PlaywrightCaptureService:
         page,
         target: TargetConfig,
         capture_date: date,
-        request_context,
     ) -> None:
-        _initial_html, selected_html = await fetch_seoulmetro_html_pair(
-            request_context=request_context,
+        _initial_html, selected_html = await asyncio.to_thread(
+            fetch_seoulmetro_html_pair,
             url=target.url,
             capture_date=capture_date,
-            timeout_ms=self.timeout_ms,
+            timeout_seconds=self.timeout_ms / 1000,
         )
         await self._load_document_via_route(
             page,
