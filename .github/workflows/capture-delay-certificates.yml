@@ -25,24 +25,13 @@ jobs:
         run: python -m playwright install --with-deps chromium
 
       - name: Run capture job
-        id: capture
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
-        run: python main.py --result-json "$RUNNER_TEMP/capture-result-${{ github.run_id }}-${{ github.run_attempt }}.json"
-
-      - name: Diagnose Seoul Metro connectivity
-        if: ${{ failure() && steps.capture.outcome == 'failure' }}
-        timeout-minutes: 4
-        continue-on-error: true
-        run: >-
-          python -m subway_delay.diagnostics
-          --capture-result "$RUNNER_TEMP/capture-result-${{ github.run_id }}-${{ github.run_attempt }}.json"
-          --config config/targets.yaml
-          --output-dir output/diagnostics
+        run: python main.py
 
       - name: Upload output artifacts
         if: always()

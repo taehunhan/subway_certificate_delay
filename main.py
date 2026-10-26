@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from pathlib import Path
 
 from subway_delay.config import load_config
@@ -28,10 +27,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip SMTP delivery and only create local artifacts.",
     )
-    parser.add_argument(
-        "--result-json", type=Path,
-        help="Write the capture date and final per-target success flags to a JSON file.",
-    )
     return parser
 
 
@@ -52,18 +47,6 @@ async def async_main() -> int:
         capture_date=capture_date,
         send_email=not args.no_email,
     )
-    if args.result_json is not None:
-        args.result_json.parent.mkdir(parents=True, exist_ok=True)
-        args.result_json.write_text(
-            json.dumps({
-                "capture_date": run_result.capture_date.isoformat(),
-                "targets": [
-                    {"id": result.target_id, "success": result.success}
-                    for result in run_result.results
-                ],
-            }, indent=2) + "\n",
-            encoding="utf-8",
-        )
     return 0 if run_result.overall_success else 1
 
 
