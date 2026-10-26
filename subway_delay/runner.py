@@ -180,15 +180,22 @@ def _build_email_body(
     success_targets = ", ".join(result.name for result in results if result.success) or "-"
     failed_targets = ", ".join(result.name for result in results if not result.success) or "-"
     zip_name = zip_path.name if zip_path is not None else "-"
-    return "\n".join(
-        [
-            f"Run time: {now_local}",
-            f"Capture date: {capture_date.isoformat()}",
-            f"Successful targets: {success_targets}",
-            f"Failed targets: {failed_targets}",
-            f"Zip file: {zip_name}",
-        ]
-    )
+    lines = [
+        f"Run time: {now_local}",
+        f"Capture date: {capture_date.isoformat()}",
+        f"Successful targets: {success_targets}",
+        f"Failed targets: {failed_targets}",
+        f"Zip file: {zip_name}",
+    ]
+    failures = [result for result in results if not result.success]
+    if failures:
+        lines.extend(["", "Failure details:"])
+        for result in failures:
+            error = " ".join((result.error or "").split()) or "Unknown capture error"
+            if len(error) > 500:
+                error = error[:497] + "..."
+            lines.append(f"- {result.name} ({result.target_id}): {error}")
+    return "\n".join(lines)
 
 
 def _setup_logger(log_path: Path) -> tuple[logging.Logger, Path]:

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from dataclasses import dataclass, replace
 from datetime import date
 from email.message import Message
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from types import ModuleType
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from subway_delay.capture import (
     GOTO_RETRY_DELAY_SECONDS,
@@ -92,18 +96,27 @@ class RecordingRoute:
         self.page.calls.append(("fulfill", self.url, status, headers, body))
 
 
+@dataclass
+class FakeNavigationResponse:
+    status: int = 200
+    status_text: str = "OK"
+    url: str = "https://example.com"
+
+
 class RecordingPage:
     def __init__(
         self,
         options: list[dict[str, str]] | None = None,
-        goto_side_effects: list[Exception | None] | None = None,
+        goto_side_effects: list[Exception | FakeNavigationResponse | None] | None = None,
     ) -> None:
         self.options = options or []
         self.goto_side_effects = goto_side_effects or []
         self.calls: list[tuple] = []
         self.route_handlers: list[tuple[str, object]] = []
 
-    async def goto(self, url: str, *, wait_until: str, timeout: int | None = None) -> None:
+    async def goto(
+        self, url: str, *, wait_until: str, timeout: int | None = None
+    ) -> FakeNavigationResponse | None:
         self.calls.append(("goto", url, wait_until, timeout))
         for route_url, handler in list(self.route_handlers):
             if route_url == url:
@@ -111,8 +124,10 @@ class RecordingPage:
                 break
         if self.goto_side_effects:
             side_effect = self.goto_side_effects.pop(0)
-            if side_effect is not None:
+            if isinstance(side_effect, Exception):
                 raise side_effect
+            return side_effect
+        return None
 
     async def set_content(self, html: str, *, wait_until: str) -> None:
         self.calls.append(("set_content", html, wait_until))
@@ -453,6 +468,8 @@ class KorailCaptureTests(unittest.TestCase):
         )
         self.assertEqual(timeout, 2468)
 
+
+class BrowserNavigationTests(unittest.TestCase):
     def test_initial_goto_retries_same_https_url_after_timeout(self) -> None:
         target = TargetConfig(
             id="korail",
@@ -561,6 +578,126 @@ class KorailCaptureTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_initial_goto_accepts_non_error_and_none_responses(self) -> None:
+        target = build_target(target_id="ui-line", selection_mode="ui_line_tab")
+        service = PlaywrightCaptureService(timeout_ms=1357)
+        for status in (200, 204, 302, 399, None):
+            with self.subTest(status=status):
+                response = FakeNavigationResponse(status=status) if status is not None else None
+                page = RecordingPage(goto_side_effects=[response])
+
+                asyncio.run(service._goto_target_page(page, target))
+
+                self.assertEqual(page.calls, [("goto", target.url, "domcontentloaded", 1357)])
+
+    def test_initial_http_errors_report_status_and_urls_without_retry(self) -> None:
+        service = PlaywrightCaptureService(timeout_ms=1357)
+        for scheme in ("http", "https"):
+            for status, status_text in ((403, "Forbidden"), (404, "Not Found"), (503, "")):
+                with self.subTest(scheme=scheme, status=status):
+                    target = replace(
+                        build_target(target_id="ui-line", selection_mode="ui_line_tab"),
+                        url=f"{scheme}://example.com/certificates",
+                    )
+                    response = FakeNavigationResponse(
+                        status=status, status_text=status_text, url="https://example.com/maintenance"
+                    )
+                    page = RecordingPage(goto_side_effects=[response])
+                    with patch("subway_delay.capture.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                        with self.assertRaises(RuntimeError) as raised:
+                            asyncio.run(service._goto_target_page(page, target))
+
+                    status_description = f"HTTP {status}" + (f" {status_text}" if status_text else "")
+                    self.assertEqual(
+                        str(raised.exception),
+                        f"Initial navigation failed for ui-line: {status_description}; "
+                        f"requested_url={target.url}; response_url={response.url}",
+                    )
+                    self.assertEqual(page.calls, [("goto", target.url, "domcontentloaded", 1357)])
+                    sleep.assert_not_awaited()
+
+    def test_retry_and_https_fallback_check_http_errors_without_third_attempt(self) -> None:
+        for scheme in ("http", "https"):
+            with self.subTest(scheme=scheme):
+                target = replace(
+                    build_target(target_id="ui-line", selection_mode="ui_line_tab"),
+                    url=f"{scheme}://example.com",
+                )
+                response = FakeNavigationResponse(status=503, status_text="Service Unavailable")
+                page = RecordingPage(goto_side_effects=[TimeoutError("timeout"), response])
+                service = PlaywrightCaptureService(timeout_ms=1357)
+
+                with patch("subway_delay.capture.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                    with self.assertRaises(RuntimeError) as raised:
+                        asyncio.run(service._goto_target_page(page, target))
+
+                self.assertIn("HTTP 503 Service Unavailable", str(raised.exception))
+                self.assertIn("requested_url=https://example.com", str(raised.exception))
+                self.assertEqual(
+                    page.calls,
+                    [
+                        ("goto", target.url, "domcontentloaded", 1357),
+                        ("goto", "https://example.com", "domcontentloaded", 1357),
+                    ],
+                )
+                if scheme == "http":
+                    sleep.assert_not_awaited()
+                else:
+                    sleep.assert_awaited_once_with(GOTO_RETRY_DELAY_SECONDS)
+
+    def test_second_navigation_timeout_is_propagated_without_third_attempt(self) -> None:
+        for scheme in ("http", "https"):
+            with self.subTest(scheme=scheme):
+                target = replace(
+                    build_target(target_id="ui-line", selection_mode="ui_line_tab"),
+                    url=f"{scheme}://example.com",
+                )
+                page = RecordingPage(
+                    goto_side_effects=[TimeoutError("first timeout"), TimeoutError("second timeout")]
+                )
+                service = PlaywrightCaptureService()
+                with patch("subway_delay.capture.asyncio.sleep", new_callable=AsyncMock):
+                    with self.assertRaisesRegex(TimeoutError, "second timeout"):
+                        asyncio.run(service._goto_target_page(page, target))
+                self.assertEqual(len(page.calls), 2)
+
+    def test_capture_stops_before_date_selection_and_screenshot_on_http_error(self) -> None:
+        for status in (403, 404, 503):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp_dir:
+                target = build_target(target_id="ui-line", selection_mode="ui_line_tab")
+                page = RecordingPage(
+                    goto_side_effects=[FakeNavigationResponse(status=status, status_text="")]
+                )
+                context = AsyncMock()
+                context.new_page.return_value = page
+                browser = AsyncMock()
+                browser.new_context.return_value = context
+                playwright = MagicMock()
+                playwright.chromium.launch = AsyncMock(return_value=browser)
+                manager = MagicMock()
+                manager.__aenter__.return_value = playwright
+                async_api = ModuleType("playwright.async_api")
+                async_api.async_playwright = MagicMock(return_value=manager)
+                modules = {"playwright": ModuleType("playwright"), "playwright.async_api": async_api}
+                service = PlaywrightCaptureService(timeout_ms=1357)
+                destination = Path(temp_dir) / "ui-line.png"
+
+                with patch.dict("sys.modules", modules), patch.object(
+                    service, "_apply_date_selection", new_callable=AsyncMock
+                ) as select_date:
+                    with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
+                        asyncio.run(
+                            service.capture(
+                                target=target, capture_date=date(2026, 10, 23), destination=destination
+                            )
+                        )
+
+                select_date.assert_not_awaited()
+                self.assertEqual(page.calls, [("goto", target.url, "domcontentloaded", 1357)])
+                self.assertFalse(destination.exists())
+                context.close.assert_awaited_once()
+                browser.close.assert_awaited_once()
 
 
 class SeoulMetroCaptureTests(unittest.TestCase):
