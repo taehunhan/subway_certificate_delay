@@ -341,8 +341,13 @@ class PlaywrightCaptureService:
         raise ValueError(f"Unsupported selection_mode: {target.selection_mode}")
 
     async def _goto_target_page(self, page, target: TargetConfig) -> None:
+        wait_until = initial_navigation_wait_until(target)
         try:
-            await self._goto_checked(page, target, url=target.url)
+            await page.goto(
+                target.url,
+                wait_until=wait_until,
+                timeout=self.timeout_ms,
+            )
         except Exception as exc:
             fallback_url = https_fallback_url(target.url)
             if should_retry_with_https_fallback(target.url, exc) and fallback_url is not None:
@@ -353,7 +358,11 @@ class PlaywrightCaptureService:
                     fallback_url,
                     exc.__class__.__name__,
                 )
-                await self._goto_checked(page, target, url=fallback_url)
+                await page.goto(
+                    fallback_url,
+                    wait_until=wait_until,
+                    timeout=self.timeout_ms,
+                )
                 return
 
             if exc.__class__.__name__ != "TimeoutError":
@@ -367,24 +376,11 @@ class PlaywrightCaptureService:
                 exc.__class__.__name__,
             )
             await asyncio.sleep(GOTO_RETRY_DELAY_SECONDS)
-            await self._goto_checked(page, target, url=target.url)
-
-    async def _goto_checked(self, page, target: TargetConfig, *, url: str) -> None:
-        response = await page.goto(
-            url,
-            wait_until=initial_navigation_wait_until(target),
-            timeout=self.timeout_ms,
-        )
-        if response is None or response.status < 400:
-            return
-
-        status = f"HTTP {response.status}"
-        if response.status_text:
-            status += f" {response.status_text}"
-        raise RuntimeError(
-            f"Initial navigation failed for {target.id}: {status}; "
-            f"requested_url={url}; response_url={response.url}"
-        )
+            await page.goto(
+                target.url,
+                wait_until=wait_until,
+                timeout=self.timeout_ms,
+            )
 
     async def _capture_korail(
         self,

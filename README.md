@@ -22,13 +22,6 @@ Python program that captures the summary delay certificate pages for selected su
 6. Or run it from `cron`.
    `15 10 * * 1-5 cd /path/to/subway_certificate_delay && /usr/bin/env python3 main.py`
 
-## Failure reporting
-
-- Browser navigation checks HTTP error responses (status 400 or higher) before waiting for page content, including after an initial-navigation retry or HTTPS fallback. Errors include the target ID, status, requested URL, and final response URL; Korail and Seoul Metro keep their separate fetch paths.
-- HTTP errors do not trigger an extra navigation retry. Existing timeout retries and up to two capture attempts per target remain unchanged.
-- Console output and `output/YYYY-MM-DD/run.log` retain full errors. Emails include `Failure details:` only for targets that still fail after retries, with each error normalized to one line and limited to 500 characters. Successful captures are still attached as a ZIP.
-- An HTTP 503 indicates unavailability, not necessarily maintenance. Maintenance pages returning HTTP 200 and failures of individual CSS/image requests are not detected by this check.
-
 ## Cron notes
 
 - `cron` registration and execution time are managed outside this repository.
