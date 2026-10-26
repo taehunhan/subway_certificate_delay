@@ -2,7 +2,6 @@ timezone: Asia/Seoul
 output_dir: output
 recipients:
   - taehunhan@gmail.com
-  - hjjang@yoonyang.com
 targets:
   - id: korail
     name: 코레일

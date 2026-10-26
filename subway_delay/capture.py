@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urljoin
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
 
 from subway_delay.config import TargetConfig
 
@@ -28,6 +30,14 @@ class CaptureServiceProtocol(Protocol):
 class SelectOption:
     value: str
     text: str
+    selected: bool = False
+
+
+@dataclass(frozen=True)
+class SeoulMetroHtmlResult:
+    initial_html: str
+    selected_html: str
+    final_url: str
 
 
 class SelectOptionsHTMLParser(HTMLParser):
@@ -39,6 +49,7 @@ class SelectOptionsHTMLParser(HTMLParser):
         self._select_depth = 0
         self._current_value: str | None = None
         self._current_text: list[str] = []
+        self._current_selected = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = dict(attrs)
@@ -58,14 +69,20 @@ class SelectOptionsHTMLParser(HTMLParser):
         if tag == "option" and self._inside_target_select:
             self._current_value = attr_map.get("value") or ""
             self._current_text = []
+            self._current_selected = "selected" in attr_map
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "option" and self._inside_target_select and self._current_value is not None:
             self.options.append(
-                SelectOption(value=self._current_value, text="".join(self._current_text).strip())
+                SelectOption(
+                    value=self._current_value,
+                    text="".join(self._current_text).strip(),
+                    selected=self._current_selected,
+                )
             )
             self._current_value = None
             self._current_text = []
+            self._current_selected = False
             return
 
         if tag == "select" and self._inside_target_select:
@@ -201,30 +218,123 @@ def fetch_seoulmetro_html_pair(
     capture_date: date,
     timeout_seconds: float,
     opener=None,
-) -> tuple[str, str]:
-    metro_opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
+    target_id: str = "seoulmetro",
+    logger: logging.Logger | None = None,
+) -> SeoulMetroHtmlResult:
+    request_logger = logger or logging.getLogger(__name__)
+    redirects = _SeoulMetroRedirectHandler(target_id, request_logger)
+    if opener is None:
+        metro_opener = build_opener(HTTPCookieProcessor(CookieJar()), redirects)
+    else:
+        metro_opener = opener
+        metro_opener.add_handler(redirects)
     metro_opener.addheaders = [("User-Agent", "Mozilla/5.0")]
 
     initial_request = Request(url, method="GET")
-    initial_html = _read_urllib_response_text(
-        metro_opener.open(initial_request, timeout=timeout_seconds),
-        url=url,
-        method="GET",
+    initial_html, initial_url = _fetch_seoulmetro_document(
+        metro_opener, initial_request, redirects=redirects, timeout_seconds=timeout_seconds,
     )
-    selected_value = option_value_for_date(extract_select_options(initial_html, "view_date"), capture_date)
+    try:
+        selected_value = option_value_for_date(extract_select_options(initial_html, "view_date"), capture_date)
+    except ValueError as exc:
+        raise ValueError(
+            f"Date option missing for {target_id} during GET: expected_date={capture_date}; "
+            f"response_url={initial_url}; {exc}"
+        ) from exc
 
     selected_request = Request(
-        url,
+        initial_url,
         data=build_seoulmetro_form_data(selected_value),
         method="POST",
     )
     selected_request.add_header("Content-Type", "application/x-www-form-urlencoded")
-    selected_html = _read_urllib_response_text(
-        metro_opener.open(selected_request, timeout=timeout_seconds),
-        url=url,
-        method="POST",
+    selected_html, selected_url = _fetch_seoulmetro_document(
+        metro_opener, selected_request, redirects=redirects, timeout_seconds=timeout_seconds,
     )
-    return initial_html, selected_html
+    _validate_seoulmetro_selection(
+        extract_select_options(selected_html, "view_date"),
+        capture_date=capture_date,
+        expected_value=selected_value,
+        target_id=target_id,
+        stage="POST HTML",
+        url=selected_url,
+    )
+    return SeoulMetroHtmlResult(initial_html, selected_html, selected_url)
+
+
+class _SeoulMetroRedirectHandler(HTTPRedirectHandler):
+    # Also take precedence when added to an injected opener with a default handler.
+    handler_order = HTTPRedirectHandler.handler_order - 1
+
+    def __init__(self, target_id: str, logger: logging.Logger) -> None:
+        self.target_id = target_id
+        self.logger = logger
+        self.last_url = ""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.logger.info(
+            "HTTP redirect for %s: method=%s status=%s from_url=%s to_url=%s",
+            self.target_id, req.get_method(), code, req.full_url, newurl,
+        )
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            self.last_url = redirected.full_url
+        return redirected
+
+
+def _fetch_seoulmetro_document(opener, request, *, redirects, timeout_seconds: float) -> tuple[str, str]:
+    method = request.get_method()
+    redirects.last_url = request.full_url
+    redirects.logger.info(
+        "HTTP request for %s: stage=%s requested_url=%s",
+        redirects.target_id, method, request.full_url,
+    )
+    try:
+        with opener.open(request, timeout=timeout_seconds) as response:
+            final_url = response.geturl()
+            redirects.last_url = final_url
+            redirects.logger.info(
+                "HTTP response for %s: stage=%s status=%s response_url=%s",
+                redirects.target_id, method, response.status, final_url,
+            )
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.read().decode(charset, errors="replace"), final_url
+    except Exception as exc:
+        if isinstance(exc, HTTPError):
+            redirects.last_url = exc.geturl()
+            redirects.logger.info(
+                "HTTP response for %s: stage=%s status=%s response_url=%s",
+                redirects.target_id, method, exc.code, redirects.last_url,
+            )
+            exc.close()
+        raise RuntimeError(
+            f"HTTP fetch failed for {redirects.target_id} during {method}: "
+            f"{type(exc).__name__}: {exc}; requested_url={request.full_url}; "
+            f"last_url={redirects.last_url}"
+        ) from exc
+
+
+def _validate_seoulmetro_selection(
+    options: list[SelectOption],
+    *,
+    capture_date: date,
+    expected_value: str,
+    target_id: str,
+    stage: str,
+    url: str,
+) -> None:
+    selected = [option for option in options if option.selected]
+    if (
+        len(selected) == 1
+        and selected[0].value == expected_value
+        and re.findall(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", selected[0].text) == [capture_date.isoformat()]
+    ):
+        return
+    actual = [(option.value, option.text) for option in selected]
+    raise ValueError(
+        f"Date selection mismatch for {target_id} during {stage}: expected_date={capture_date}, "
+        f"expected_value={expected_value}; selected_options={actual}; response_url={url}"
+    )
 
 
 async def _read_response_text(response, *, url: str, method: str) -> str:
@@ -233,24 +343,17 @@ async def _read_response_text(response, *, url: str, method: str) -> str:
     return await response.text()
 
 
-def _read_urllib_response_text(response, *, url: str, method: str) -> str:
-    with response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
-
-
 KORAIL_DATE_SELECTOR = 'select[name="indate"]'
 KORAIL_TABLE_SELECTOR = ".table-responsive table"
 SEOULMETRO_TABLE_SELECTOR = "#contents .tbl-type1"
 SEOULMETRO_BOTTOM_MARKERS = ("9호선", "주의사항")
 GOTO_RETRY_DELAY_SECONDS = 3
 
-logger = logging.getLogger(__name__)
-
 
 class PlaywrightCaptureService:
-    def __init__(self, timeout_ms: int = 30_000) -> None:
+    def __init__(self, timeout_ms: int = 30_000, *, logger: logging.Logger | None = None) -> None:
         self.timeout_ms = timeout_ms
+        self.logger = logger or logging.getLogger(__name__)
 
     async def capture(
         self,
@@ -346,7 +449,7 @@ class PlaywrightCaptureService:
         except Exception as exc:
             fallback_url = https_fallback_url(target.url)
             if should_retry_with_https_fallback(target.url, exc) and fallback_url is not None:
-                logger.warning(
+                self.logger.warning(
                     "Initial goto timed out for %s at %s; retrying with fallback URL %s (%s)",
                     target.id,
                     target.url,
@@ -359,7 +462,7 @@ class PlaywrightCaptureService:
             if exc.__class__.__name__ != "TimeoutError":
                 raise
 
-            logger.warning(
+            self.logger.warning(
                 "Initial goto timed out for %s at %s; retrying same URL after %ss (%s)",
                 target.id,
                 target.url,
@@ -452,19 +555,38 @@ class PlaywrightCaptureService:
         target: TargetConfig,
         capture_date: date,
     ) -> None:
-        _initial_html, selected_html = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             fetch_seoulmetro_html_pair,
             url=target.url,
             capture_date=capture_date,
             timeout_seconds=self.timeout_ms / 1000,
+            target_id=target.id,
+            logger=self.logger,
         )
         await self._load_document_via_route(
             page,
-            url=target.url,
-            html=selected_html,
+            url=result.final_url,
+            html=result.selected_html,
             wait_until="domcontentloaded",
         )
         await self._wait_for_seoulmetro_capture_ready(page, target)
+        options = await page.locator("select#view_date option").evaluate_all(
+            """(elements) => elements.map((option) => ({
+                value: option.value,
+                text: option.textContent.trim(),
+                selected: option.selected
+            }))"""
+        )
+        _validate_seoulmetro_selection(
+            [SelectOption(**option) for option in options],
+            capture_date=capture_date,
+            expected_value=option_value_for_date(
+                extract_select_options(result.initial_html, "view_date"), capture_date
+            ),
+            target_id=target.id,
+            stage="rendered DOM",
+            url=page.url,
+        )
 
     async def _submit_target_form(self, page, target: TargetConfig) -> None:
         if not target.submit_selector:
