@@ -62,7 +62,7 @@ async def execute_run(
     logger.info("Run started for %s", capture_date.isoformat())
     results = await _capture_targets(
         logger=logger,
-        capture_service=capture_service or PlaywrightCaptureService(logger=logger),
+        capture_service=capture_service or PlaywrightCaptureService(),
         targets=config.enabled_targets,
         capture_date=capture_date,
         run_dir=run_dir,

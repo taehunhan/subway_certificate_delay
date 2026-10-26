@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import tempfile
 import unittest
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
-from http.client import RemoteDisconnected
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-from urllib.request import HTTPRedirectHandler
 from zipfile import ZipFile
 
-from subway_delay.capture import PlaywrightCaptureService, fetch_seoulmetro_html_pair
 from subway_delay.config import AppConfig, TargetConfig
 from subway_delay.runner import TargetResult, _build_email_body, execute_run
 
@@ -96,61 +91,6 @@ def build_test_config(base_dir: Path) -> AppConfig:
 
 
 class ExecuteRunTests(unittest.TestCase):
-    def test_seoulmetro_fetch_logs_reach_console_file_and_email_with_two_attempts(self) -> None:
-        source_url = "http://example.com/delay"
-        final_url = "https://example.com:444/delay"
-        openers = []
-
-        def build_fake_opener(*handlers):
-            redirects = next(handler for handler in handlers if isinstance(handler, HTTPRedirectHandler))
-            opener = MagicMock()
-
-            def disconnect(request, *, timeout):
-                redirects.redirect_request(request, None, 302, "Found", {}, final_url)
-                raise RemoteDisconnected("Remote end closed connection without response")
-
-            opener.open.side_effect = disconnect
-            openers.append(opener)
-            return opener
-
-        async def fetch_only(service, *, target, capture_date, destination):
-            await asyncio.to_thread(
-                fetch_seoulmetro_html_pair, url=target.url, capture_date=capture_date,
-                timeout_seconds=1, target_id=target.id, logger=service.logger,
-            )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            base_config = build_test_config(Path(temp_dir))
-            target = replace(
-                base_config.targets[0], id="seoulmetro", name="Seoul Metro",
-                selection_mode="seoulmetro_select", url=source_url,
-            )
-            config = replace(base_config, targets=[target])
-            mailer = FakeMailer()
-            with patch.object(PlaywrightCaptureService, "capture", new=fetch_only), patch(
-                "subway_delay.capture.build_opener", side_effect=build_fake_opener
-            ), patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                result = asyncio.run(execute_run(
-                    config=config, capture_date=date(2026, 10, 23), send_email=True, mailer=mailer,
-                ))
-
-            self.assertEqual(len(openers), 2)
-            for opener in openers:
-                opener.open.assert_called_once()
-            self.assertFalse(result.overall_success)
-            self.assertEqual(result.results[0].attempts, 2)
-            self.assertIsNone(result.zip_path)
-            log = result.log_path.read_text(encoding="utf-8")
-            for output in (log, stderr.getvalue()):
-                self.assertIn(f"stage=GET requested_url={source_url}", output)
-                self.assertIn(f"status=302 from_url={source_url} to_url={final_url}", output)
-                self.assertIn("RemoteDisconnected", output)
-                self.assertIn(f"last_url={final_url}", output)
-            body = mailer.sent_messages[0]["body"]
-            self.assertIn("Failure details:", body)
-            self.assertIn("during GET: RemoteDisconnected", body)
-            self.assertIn(f"last_url={final_url}", body)
-
     def test_dry_run_creates_pngs_zip_and_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = build_test_config(Path(temp_dir))

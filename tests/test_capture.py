@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
 from datetime import date
 from email.message import Message
-from http.client import RemoteDisconnected
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
-from urllib.error import HTTPError
 
 from subway_delay.capture import (
     GOTO_RETRY_DELAY_SECONDS,
@@ -20,8 +17,6 @@ from subway_delay.capture import (
     SEOULMETRO_BOTTOM_MARKERS,
     SEOULMETRO_TABLE_SELECTOR,
     PlaywrightCaptureService,
-    SelectOption,
-    SeoulMetroHtmlResult,
     build_korail_form_data,
     build_seoulmetro_form_data,
     extract_select_options,
@@ -111,11 +106,10 @@ class FakeNavigationResponse:
 class RecordingPage:
     def __init__(
         self,
-        options: list[dict[str, str | bool]] | None = None,
+        options: list[dict[str, str]] | None = None,
         goto_side_effects: list[Exception | FakeNavigationResponse | None] | None = None,
     ) -> None:
         self.options = options or []
-        self.url = "about:blank"
         self.goto_side_effects = goto_side_effects or []
         self.calls: list[tuple] = []
         self.route_handlers: list[tuple[str, object]] = []
@@ -124,7 +118,6 @@ class RecordingPage:
         self, url: str, *, wait_until: str, timeout: int | None = None
     ) -> FakeNavigationResponse | None:
         self.calls.append(("goto", url, wait_until, timeout))
-        self.url = url
         for route_url, handler in list(self.route_handlers):
             if route_url == url:
                 await handler(RecordingRoute(self, url))
@@ -219,13 +212,8 @@ class FakeAPIRequestContext:
 
 
 class FakeResponse:
-    def __init__(
-        self, body: str, charset: str = "utf-8", *, url: str = "https://example.com", status: int = 200
-    ) -> None:
+    def __init__(self, body: str, charset: str = "utf-8") -> None:
         self._body = body.encode(charset)
-        self.url = url
-        self.status = status
-        self.closed = False
         self.headers = Message()
         self.headers["Content-Type"] = f"text/html; charset={charset}"
 
@@ -233,54 +221,21 @@ class FakeResponse:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        self.closed = True
         return False
-
-    def geturl(self) -> str:
-        if self.closed:
-            raise RuntimeError("URL must be read before closing response")
-        return self.url
 
     def read(self) -> bytes:
         return self._body
 
 
 class FakeOpener:
-    def __init__(
-        self,
-        responses: list[FakeResponse | Exception],
-        redirects: list[list[tuple[int, str]]] | None = None,
-    ) -> None:
+    def __init__(self, responses: list[FakeResponse]) -> None:
         self.responses = responses
-        self.redirects = redirects or []
-        self.handlers = []
         self.calls: list[tuple[object, float | None]] = []
         self.addheaders: list[tuple[str, str]] = []
 
     def open(self, request, timeout: float | None = None):
         self.calls.append((request, timeout))
-        call_index = len(self.calls) - 1
-        if call_index < len(self.redirects):
-            for status, url in self.redirects[call_index]:
-                request = self.handlers[0].redirect_request(request, None, status, "Redirect", {}, url)
-        response = self.responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    def add_handler(self, handler) -> None:
-        self.handlers.append(handler)
-
-
-def seoulmetro_html(selected_value: str | None = "3") -> str:
-    today_selected = " selected" if selected_value == "0" else ""
-    target_selected = " selected" if selected_value == "3" else ""
-    return (
-        '<html><head></head><body><select id="view_date" name="view_date">'
-        f'<option value="0"{today_selected}>Today (2026-10-26)</option>'
-        f'<option value="3"{target_selected}>3 days ago (2026-10-23)</option>'
-        '</select></body></html>'
-    )
+        return self.responses.pop(0)
 
 
 class CaptureNavigationTests(unittest.TestCase):
@@ -747,32 +702,42 @@ class BrowserNavigationTests(unittest.TestCase):
 
 class SeoulMetroCaptureTests(unittest.TestCase):
     def test_fetch_seoulmetro_html_pair_uses_get_then_post_with_matching_option(self) -> None:
-        source_url = "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"
-        for final_url in (source_url, source_url.replace("http://www.seoulmetro.co.kr", "https://www.seoulmetro.co.kr:444")):
-            with self.subTest(final_url=final_url):
-                responses = [
-                    FakeResponse(seoulmetro_html("0"), url=final_url),
-                    FakeResponse(seoulmetro_html("3"), url=final_url),
-                ]
-                opener = FakeOpener(responses=list(responses))
+        opener = FakeOpener(
+            responses=[
+                FakeResponse(
+                    """
+                    <html><body>
+                        <select name="view_date" id="view_date">
+                            <option value="0">금일 (2026-05-29)</option>
+                            <option value="1">1일전 (2026-05-28)</option>
+                        </select>
+                    </body></html>
+                    """
+                ),
+                FakeResponse("<html><body>selected</body></html>"),
+            ]
+        )
 
-                result = fetch_seoulmetro_html_pair(
-                    url=source_url, capture_date=date(2026, 10, 23), timeout_seconds=3.21, opener=opener,
-                )
+        initial_html, selected_html = fetch_seoulmetro_html_pair(
+            url="http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
+            capture_date=date(2026, 5, 28),
+            timeout_seconds=3.21,
+            opener=opener,
+        )
 
-                self.assertEqual(result, SeoulMetroHtmlResult(seoulmetro_html("0"), seoulmetro_html("3"), final_url))
-                self.assertTrue(all(response.closed for response in responses))
-                self.assertEqual(len(opener.calls), 2)
-                get_request, get_timeout = opener.calls[0]
-                post_request, post_timeout = opener.calls[1]
-                self.assertEqual(get_request.get_method(), "GET")
-                self.assertEqual(get_request.full_url, source_url)
-                self.assertIsNone(get_request.data)
-                self.assertEqual(get_timeout, 3.21)
-                self.assertEqual(post_request.get_method(), "POST")
-                self.assertEqual(post_request.full_url, final_url)
-                self.assertEqual(post_request.data, b"view_date=3")
-                self.assertEqual(post_timeout, 3.21)
+        self.assertIn('option value="1"', initial_html)
+        self.assertEqual(selected_html, "<html><body>selected</body></html>")
+        self.assertEqual(len(opener.calls), 2)
+        get_request, get_timeout = opener.calls[0]
+        post_request, post_timeout = opener.calls[1]
+        self.assertEqual(get_request.get_method(), "GET")
+        self.assertEqual(get_request.full_url, "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543")
+        self.assertIsNone(get_request.data)
+        self.assertEqual(get_timeout, 3.21)
+        self.assertEqual(post_request.get_method(), "POST")
+        self.assertEqual(post_request.full_url, "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543")
+        self.assertEqual(post_request.data, b"view_date=1")
+        self.assertEqual(post_timeout, 3.21)
 
     def test_capture_seoulmetro_uses_routed_document_load(self) -> None:
         target = TargetConfig(
@@ -787,7 +752,7 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             initial_wait_until="commit",
             submit_wait_until="commit",
         )
-        page = RecordingPage(options=[{"value": "3", "text": "3 days ago (2026-10-23)", "selected": True}])
+        page = RecordingPage()
         service = PlaywrightCaptureService(timeout_ms=3210)
         service._wait_for_seoulmetro_capture_ready = AsyncMock(
             side_effect=lambda page_arg, target_arg: page_arg.calls.append(
@@ -795,176 +760,39 @@ class SeoulMetroCaptureTests(unittest.TestCase):
             )
         )
 
-        final_url = "https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543"
         with patch(
             "subway_delay.capture.asyncio.to_thread",
             new=AsyncMock(
-                return_value=SeoulMetroHtmlResult(
-                    seoulmetro_html("0"), seoulmetro_html("3"), final_url,
+                return_value=(
+                    "<html><body>initial</body></html>",
+                    "<html><head></head><body>selected</body></html>",
                 )
             ),
-        ) as fetch:
-            asyncio.run(service._capture_seoulmetro(page, target, capture_date=date(2026, 10, 23)))
-
-        fetch.assert_awaited_once_with(
-            fetch_seoulmetro_html_pair, url=target.url, capture_date=date(2026, 10, 23),
-            timeout_seconds=3.21, target_id=target.id, logger=service.logger,
-        )
+        ):
+            asyncio.run(service._capture_seoulmetro(page, target, capture_date=date(2026, 5, 28)))
 
         self.assertEqual(
             page.calls,
             [
-                ("route", final_url),
+                ("route", "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"),
                 (
                     "goto",
-                    final_url,
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
                     "domcontentloaded",
                     3210,
                 ),
                 (
                     "fulfill",
-                    final_url,
+                    "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543",
                     200,
                     {"Content-Type": "text/html; charset=UTF-8"},
-                    seoulmetro_html("3"),
+                    "<html><head></head><body>selected</body></html>",
                 ),
-                ("unroute", final_url),
+                ("unroute", "http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543"),
                 ("wait_ready", "#contents"),
-                ("locator", "select#view_date option"),
-                ("evaluate_all", "select#view_date option"),
             ],
         )
         self.assertNotIn(("set_content",), [call[:1] for call in page.calls])
-
-    def test_selected_attribute_is_boolean_and_scoped_to_target_select(self) -> None:
-        html = (
-            '<select id="other"><option selected value="ignored">Ignored</option></select>'
-            '<select id="view_date"><option value="0">Today</option>'
-            '<option value="1" selected="selected">Yesterday</option>'
-            '<option value="2" selected>Earlier</option></select>'
-        )
-        self.assertEqual(extract_select_options(html, "view_date"), [
-            SelectOption("0", "Today"), SelectOption("1", "Yesterday", True), SelectOption("2", "Earlier", True),
-        ])
-
-    def test_post_html_rejects_missing_or_mismatched_selection(self) -> None:
-        invalid_html = [
-            "<html>Maintenance</html>",
-            seoulmetro_html(None),
-            seoulmetro_html("0"),
-            seoulmetro_html("3").replace('value="0"', 'value="0" selected'),
-            seoulmetro_html("3").replace('value="3"', 'value="2"'),
-            seoulmetro_html("3").replace("2026-10-23", "2026-10-230"),
-        ]
-        for html in invalid_html:
-            with self.subTest(html=html):
-                opener = FakeOpener([FakeResponse(seoulmetro_html("0")), FakeResponse(html)])
-                with self.assertRaises(ValueError) as raised:
-                    fetch_seoulmetro_html_pair(
-                        url="https://example.com", capture_date=date(2026, 10, 23),
-                        timeout_seconds=1, opener=opener,
-                    )
-                self.assertIn("seoulmetro during POST HTML", str(raised.exception))
-                self.assertIn("expected_date=2026-10-23", str(raised.exception))
-                self.assertIn("selected_options=", str(raised.exception))
-                self.assertEqual(len(opener.calls), 2)
-
-    def test_missing_get_date_does_not_post(self) -> None:
-        for html in ("<html>Maintenance</html>", seoulmetro_html("0").replace("2026-10-23", "2026-10-24")):
-            with self.subTest(html=html):
-                opener = FakeOpener([FakeResponse(html)])
-                with self.assertRaisesRegex(ValueError, "during GET: expected_date=2026-10-23"):
-                    fetch_seoulmetro_html_pair(
-                        url="https://example.com", capture_date=date(2026, 10, 23),
-                        timeout_seconds=1, opener=opener,
-                    )
-                self.assertEqual(len(opener.calls), 1)
-
-    def test_post_redirect_url_is_returned_and_request_diagnostics_are_logged(self) -> None:
-        source = "http://example.com/delay"
-        get_url = "https://example.com:444/delay"
-        post_url = "https://example.com:444/result"
-        opener = FakeOpener(
-            [FakeResponse(seoulmetro_html("0"), url=get_url), FakeResponse(seoulmetro_html("3"), url=post_url)],
-            redirects=[[(302, get_url)], [(302, post_url)]],
-        )
-        log = logging.getLogger("test.seoulmetro")
-        with self.assertLogs(log, level="INFO") as captured:
-            result = fetch_seoulmetro_html_pair(
-                url=source, capture_date=date(2026, 10, 23), timeout_seconds=1, opener=opener, logger=log,
-            )
-        self.assertEqual(result.final_url, post_url)
-        messages = "\n".join(captured.output)
-        self.assertIn(f"from_url={source} to_url={get_url}", messages)
-        self.assertIn(f"from_url={get_url} to_url={post_url}", messages)
-        self.assertIn(f"stage=POST status=200 response_url={post_url}", messages)
-        self.assertIn("method=POST status=302", messages)
-        self.assertNotIn("<html>", messages)
-
-    def test_disconnect_reports_stage_and_last_redirect_without_internal_retry(self) -> None:
-        for stage in ("GET", "POST"):
-            with self.subTest(stage=stage):
-                source = "http://example.com/delay"
-                redirected = "https://example.com:444/delay"
-                last_url = redirected if stage == "GET" else "https://example.com:444/result"
-                error = RemoteDisconnected("Remote end closed connection without response")
-                responses = [error] if stage == "GET" else [FakeResponse(seoulmetro_html("0"), url=redirected), error]
-                redirects = [[(302, last_url)]] if stage == "GET" else [[(302, redirected)], [(302, last_url)]]
-                opener = FakeOpener(responses, redirects=redirects)
-                with self.assertRaises(RuntimeError) as raised:
-                    fetch_seoulmetro_html_pair(
-                        url=source, capture_date=date(2026, 10, 23), timeout_seconds=1, opener=opener,
-                    )
-                self.assertIs(raised.exception.__cause__, error)
-                self.assertIn(f"for seoulmetro during {stage}: RemoteDisconnected", str(raised.exception))
-                self.assertIn(f"last_url={last_url}", str(raised.exception))
-                self.assertEqual(len(opener.calls), 1 if stage == "GET" else 2)
-
-    def test_http_error_preserves_status_and_cause_without_internal_retry(self) -> None:
-        url = "https://example.com:444/delay"
-        error = HTTPError(url, 503, "Service Unavailable", {}, None)
-        opener = FakeOpener([error])
-        with self.assertLogs("subway_delay.capture", level="INFO") as captured:
-            with self.assertRaises(RuntimeError) as raised:
-                fetch_seoulmetro_html_pair(
-                    url=url, capture_date=date(2026, 10, 23), timeout_seconds=1, opener=opener,
-                )
-        self.assertIs(raised.exception.__cause__, error)
-        self.assertIn("HTTPError: HTTP Error 503", str(raised.exception))
-        self.assertIn(f"stage=GET status=503 response_url={url}", "\n".join(captured.output))
-        self.assertEqual(len(opener.calls), 1)
-
-    def test_dom_date_change_stops_capture_before_screenshot(self) -> None:
-        for options in ([], [{"value": "0", "text": "Today (2026-10-26)", "selected": True}]):
-            with self.subTest(options=options), tempfile.TemporaryDirectory() as temp_dir:
-                page = RecordingPage(options=options)
-                context = AsyncMock()
-                context.new_page.return_value = page
-                browser = AsyncMock()
-                browser.new_context.return_value = context
-                playwright = MagicMock()
-                playwright.chromium.launch = AsyncMock(return_value=browser)
-                manager = MagicMock()
-                manager.__aenter__.return_value = playwright
-                async_api = ModuleType("playwright.async_api")
-                async_api.async_playwright = MagicMock(return_value=manager)
-                modules = {"playwright": ModuleType("playwright"), "playwright.async_api": async_api}
-                service = PlaywrightCaptureService()
-                target = build_target(target_id="seoulmetro", selection_mode="seoulmetro_select")
-                result = SeoulMetroHtmlResult(seoulmetro_html("0"), seoulmetro_html("3"), "https://example.com:444")
-                destination = Path(temp_dir) / "seoulmetro.png"
-                with patch.dict("sys.modules", modules), patch(
-                    "subway_delay.capture.asyncio.to_thread", new=AsyncMock(return_value=result)
-                ), patch.object(service, "_wait_for_seoulmetro_capture_ready", new_callable=AsyncMock):
-                    with self.assertRaisesRegex(ValueError, "during rendered DOM: expected_date=2026-10-23"):
-                        asyncio.run(service.capture(
-                            target=target, capture_date=date(2026, 10, 23), destination=destination,
-                        ))
-                self.assertFalse(destination.exists())
-                self.assertNotIn(("locator", target.capture_selector), page.calls)
-                self.assertFalse(any(call[0] == "wait_for_selector" for call in page.calls))
-                context.close.assert_awaited_once()
-                browser.close.assert_awaited_once()
 
     def test_wait_for_seoulmetro_capture_ready_waits_for_bottom_markers_then_height(self) -> None:
         target = TargetConfig(

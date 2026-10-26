@@ -13,8 +13,7 @@ Python program that captures the summary delay certificate pages for selected su
    `initial_wait_until` for the first `page.goto()`, `submit_wait_until` for submit navigation.
    If omitted, they default to `domcontentloaded` and `networkidle`. Use `commit` for flaky pages that time out before the DOM finishes loading.
    Korail is captured from server-rendered HTML fetched through a Playwright API request context and rendered locally in Playwright.
-   Seoul Metro is fetched using `urllib` with certificate verification enabled. After the initial GET, the date is POSTed to the final redirected URL using the same cookie session. The POST response is replayed through a routed document load at its final URL, without hardcoding a scheme or port.
-   Seoul Metro's selected date and option value are checked in both the returned HTML and the rendered page. Missing or mismatched selections fail the capture instead of saving the wrong date.
+   Seoul Metro is fetched over standard HTTP, then replayed through a routed document load so its original page assets and scripts render under the real URL.
 4. Export SMTP variables.
    `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`
 5. Run manually.
@@ -29,7 +28,6 @@ Python program that captures the summary delay certificate pages for selected su
 - HTTP errors do not trigger an extra navigation retry. Existing timeout retries and up to two capture attempts per target remain unchanged.
 - Console output and `output/YYYY-MM-DD/run.log` retain full errors. Emails include `Failure details:` only for targets that still fail after retries, with each error normalized to one line and limited to 500 characters. Successful captures are still attached as a ZIP.
 - An HTTP 503 indicates unavailability, not necessarily maintenance. Maintenance pages returning HTTP 200 and failures of individual CSS/image requests are not detected by this check.
-- Seoul Metro logs GET/POST stages, redirect status codes and URLs, and final response status/URL to the console and run log, without cookies or full response bodies. Fetch failures retain the original exception and include the request stage and last URL. There are no internal fetch retries or added delays; only the existing maximum of two capture attempts applies.
 
 ## Cron notes
 
