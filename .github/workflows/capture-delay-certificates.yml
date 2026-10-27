@@ -2,6 +2,21 @@ name: Capture Subway Delay Certificates
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'capture: normal email job; other modes never send email'
+        type: choice
+        required: false
+        default: capture
+        options:
+          - capture
+          - diagnose-seoulmetro
+          - check-seoulmetro
+      diagnostic_url:
+        description: 'Diagnostic HTTPS destination only; does not change capture configuration'
+        type: string
+        required: false
+        default: 'https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543'
 
 jobs:
   capture:
@@ -10,6 +25,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Validate run mode
+        env:
+          RUN_MODE: ${{ inputs.mode }}
+        run: |
+          case "${RUN_MODE:-capture}" in
+            capture|diagnose-seoulmetro|check-seoulmetro) ;;
+            *) echo "Unsupported run mode" >&2; exit 2 ;;
+          esac
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -22,9 +46,11 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Install Playwright browser
+        if: ${{ inputs.mode != 'diagnose-seoulmetro' }}
         run: python -m playwright install --with-deps chromium
 
       - name: Run capture job
+        if: ${{ inputs.mode == 'capture' || inputs.mode == '' }}
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -32,6 +58,21 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
         run: python main.py
+
+      - name: Diagnose Seoul Metro connectivity
+        if: ${{ inputs.mode == 'diagnose-seoulmetro' }}
+        timeout-minutes: 4
+        env:
+          DIAGNOSTIC_URL: ${{ inputs.diagnostic_url }}
+        run: >-
+          python -m subway_delay.diagnostics
+          --config config/targets.yaml
+          --output-dir output/diagnostics
+          --direct-url "$DIAGNOSTIC_URL"
+
+      - name: Check Seoul Metro without email
+        if: ${{ inputs.mode == 'check-seoulmetro' }}
+        run: python main.py --target seoulmetro --no-email --output-dir output/seoulmetro-check
 
       - name: Upload output artifacts
         if: always()

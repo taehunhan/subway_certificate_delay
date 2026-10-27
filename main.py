@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 from subway_delay.config import load_config
@@ -27,6 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip SMTP delivery and only create local artifacts.",
     )
+    parser.add_argument(
+        "--target", action="append", metavar="ID",
+        help="Run only this enabled target; repeat to select multiple targets.",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path,
+        help="Override the output directory, for example for an isolated dry run.",
+    )
     return parser
 
 
@@ -36,6 +45,15 @@ async def async_main() -> int:
 
     config_path = Path(args.config)
     config = load_config(config_path, base_dir=Path.cwd())
+    if args.target:
+        requested = set(args.target)
+        available = {target.id for target in config.enabled_targets}
+        unknown = requested - available
+        if unknown:
+            parser.error("Unknown or disabled target(s): " + ", ".join(sorted(unknown)))
+        config = replace(config, targets=[target for target in config.enabled_targets if target.id in requested])
+    if args.output_dir is not None:
+        config = replace(config, output_dir=args.output_dir.resolve())
     manual_date = parse_manual_date(args.date)
     capture_date = resolve_capture_date(
         timezone_name=config.timezone,

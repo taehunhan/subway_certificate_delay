@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from http.cookiejar import CookieJar
@@ -28,6 +29,14 @@ class CaptureServiceProtocol(Protocol):
 class SelectOption:
     value: str
     text: str
+    selected: bool = False
+
+
+@dataclass(frozen=True)
+class SeoulMetroHtmlResult:
+    initial_html: str
+    selected_html: str
+    final_url: str
 
 
 class SelectOptionsHTMLParser(HTMLParser):
@@ -39,6 +48,7 @@ class SelectOptionsHTMLParser(HTMLParser):
         self._select_depth = 0
         self._current_value: str | None = None
         self._current_text: list[str] = []
+        self._current_selected = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = dict(attrs)
@@ -58,11 +68,15 @@ class SelectOptionsHTMLParser(HTMLParser):
         if tag == "option" and self._inside_target_select:
             self._current_value = attr_map.get("value") or ""
             self._current_text = []
+            self._current_selected = "selected" in attr_map
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "option" and self._inside_target_select and self._current_value is not None:
             self.options.append(
-                SelectOption(value=self._current_value, text="".join(self._current_text).strip())
+                SelectOption(
+                    value=self._current_value, text="".join(self._current_text).strip(),
+                    selected=self._current_selected,
+                )
             )
             self._current_value = None
             self._current_text = []
@@ -201,30 +215,30 @@ def fetch_seoulmetro_html_pair(
     capture_date: date,
     timeout_seconds: float,
     opener=None,
-) -> tuple[str, str]:
+) -> SeoulMetroHtmlResult:
     metro_opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
     metro_opener.addheaders = [("User-Agent", "Mozilla/5.0")]
 
     initial_request = Request(url, method="GET")
-    initial_html = _read_urllib_response_text(
-        metro_opener.open(initial_request, timeout=timeout_seconds),
-        url=url,
-        method="GET",
-    )
+    with metro_opener.open(initial_request, timeout=timeout_seconds) as response:
+        initial_url = response.geturl()
+        initial_html = _read_urllib_response_text(response)
     selected_value = option_value_for_date(extract_select_options(initial_html, "view_date"), capture_date)
 
     selected_request = Request(
-        url,
+        initial_url,
         data=build_seoulmetro_form_data(selected_value),
         method="POST",
     )
     selected_request.add_header("Content-Type", "application/x-www-form-urlencoded")
-    selected_html = _read_urllib_response_text(
-        metro_opener.open(selected_request, timeout=timeout_seconds),
-        url=url,
-        method="POST",
+    # Posting to the pre-redirect URL can turn POST into GET and lose the date.
+    with metro_opener.open(selected_request, timeout=timeout_seconds) as response:
+        final_url = response.geturl()
+        selected_html = _read_urllib_response_text(response)
+    _validate_seoulmetro_selection(
+        extract_select_options(selected_html, "view_date"), capture_date, selected_value, "POST HTML",
     )
-    return initial_html, selected_html
+    return SeoulMetroHtmlResult(initial_html, selected_html, final_url)
 
 
 async def _read_response_text(response, *, url: str, method: str) -> str:
@@ -233,10 +247,24 @@ async def _read_response_text(response, *, url: str, method: str) -> str:
     return await response.text()
 
 
-def _read_urllib_response_text(response, *, url: str, method: str) -> str:
-    with response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
+def _read_urllib_response_text(response) -> str:
+    charset = response.headers.get_content_charset() or "utf-8"
+    return response.read().decode(charset, errors="replace")
+
+
+def _validate_seoulmetro_selection(
+    options: list[SelectOption], capture_date: date, expected_value: str, stage: str,
+) -> None:
+    selected = [option for option in options if option.selected]
+    if (
+        len(selected) != 1 or selected[0].value != expected_value
+        or re.findall(r"\d{4}-\d{2}-\d{2}", selected[0].text) != [capture_date.isoformat()]
+    ):
+        actual = [(option.value, option.text) for option in selected]
+        raise ValueError(
+            f"Seoul Metro date mismatch during {stage}: expected_date={capture_date}, "
+            f"expected_value={expected_value!r}, actual_selected={actual!r}"
+        )
 
 
 KORAIL_DATE_SELECTOR = 'select[name="indate"]'
@@ -448,7 +476,7 @@ class PlaywrightCaptureService:
         target: TargetConfig,
         capture_date: date,
     ) -> None:
-        _initial_html, selected_html = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             fetch_seoulmetro_html_pair,
             url=target.url,
             capture_date=capture_date,
@@ -456,11 +484,21 @@ class PlaywrightCaptureService:
         )
         await self._load_document_via_route(
             page,
-            url=target.url,
-            html=selected_html,
+            url=result.final_url,
+            html=result.selected_html,
             wait_until="domcontentloaded",
         )
         await self._wait_for_seoulmetro_capture_ready(page, target)
+        options = await page.locator("select#view_date option").evaluate_all(
+            """(elements) => elements.map((option) => ({
+                value: option.value, text: option.textContent.trim(), selected: option.selected
+            }))"""
+        )
+        _validate_seoulmetro_selection(
+            [SelectOption(**option) for option in options], capture_date,
+            option_value_for_date(extract_select_options(result.initial_html, "view_date"), capture_date),
+            "rendered DOM",
+        )
 
     async def _submit_target_form(self, page, target: TargetConfig) -> None:
         if not target.submit_selector:
