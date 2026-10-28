@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from zipfile import ZipFile
+from unittest.mock import patch
 
-from subway_delay.config import AppConfig, TargetConfig
+from subway_delay.capture import PlaywrightCaptureService, SeoulMetroHtmlResult
+from subway_delay.config import AppConfig, TargetConfig, load_config
 from subway_delay.runner import RunResult, execute_run
+from test_capture import RecordingPage
 
 
 class FakeCaptureService:
@@ -83,6 +86,45 @@ def build_test_config(base_dir: Path) -> AppConfig:
 
 
 class ExecuteRunTests(unittest.TestCase):
+    def test_production_curl_with_all_targets_email_and_outer_retry(self) -> None:
+        selected = '<select id="view_date"><option value="1" selected>2026-10-27</option></select>'
+        repository_config = load_config(Path(__file__).resolve().parents[1] / "config/targets.yaml")
+        target = next(target for target in repository_config.targets if target.id == "seoulmetro")
+
+        async def capture(service, *, target, capture_date, destination):
+            if target.selection_mode == "seoulmetro_select":
+                page = RecordingPage(options=[{"value": "1", "text": "2026-10-27", "selected": True}])
+                await service._capture_seoulmetro(page, target, capture_date)
+            destination.write_bytes(b"fake screenshot")
+
+        for fails in (False, True):
+            with self.subTest(fails=fails), tempfile.TemporaryDirectory() as directory:
+                config = replace(repository_config, output_dir=Path(directory))
+                mailer = FakeMailer()
+                with patch.object(PlaywrightCaptureService, "capture", new=capture), patch(
+                    "subway_delay.capture.fetch_seoulmetro_html_pair_curl",
+                    side_effect=RuntimeError("curl exit code 52") if fails else None,
+                    return_value=SeoulMetroHtmlResult(selected, selected, target.url),
+                ) as fetch, patch("subway_delay.capture.fetch_seoulmetro_html_pair") as old_fetch:
+                    result = asyncio.run(execute_run(
+                        config=config, capture_date=date(2026, 10, 27),
+                        send_email=True, mailer=mailer,
+                    ))
+                old_fetch.assert_not_called()
+                self.assertEqual(fetch.call_count, 2 if fails else 1)
+                self.assertEqual(fetch.call_args.kwargs["direct_url"], target.url)
+                self.assertEqual(result.overall_success, not fails)
+                self.assertTrue(result.email_sent)
+                self.assertEqual(len(mailer.sent_messages), 1)
+                expected_names = sorted(
+                    item.screenshot_filename(date(2026, 10, 27))
+                    for item in config.enabled_targets if not (fails and item.id == "seoulmetro")
+                )
+                with ZipFile(result.zip_path) as archive:
+                    self.assertEqual(sorted(archive.namelist()), expected_names)
+                log = result.log_path.read_text(encoding="utf-8")
+                self.assertIn("curl exit code 52" if fails else "curl rendered date verified", log)
+
     def test_dry_run_creates_pngs_zip_and_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = build_test_config(Path(temp_dir))

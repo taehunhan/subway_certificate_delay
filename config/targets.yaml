@@ -16,7 +16,7 @@ targets:
     submit_selector: button[type="submit"]
   - id: seoulmetro
     name: 서울교통공사
-    url: http://www.seoulmetro.co.kr/kr/delayProofList.do?menuIdx=543
+    url: https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543
     enabled: true
     selection_mode: seoulmetro_select
     initial_wait_until: commit

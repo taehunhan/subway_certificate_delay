@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--seoulmetro-curl-url", metavar="HTTPS_URL",
-        help="Trial curl GET/POST capture; requires --target seoulmetro --no-email.",
+        help="Override the configured Seoul Metro HTTPS URL for checks; requires --target seoulmetro --no-email.",
     )
     return parser
 

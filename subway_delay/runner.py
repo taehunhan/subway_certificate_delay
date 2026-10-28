@@ -61,7 +61,7 @@ async def execute_run(
         or config.enabled_targets[0].id != "seoulmetro"
         or config.enabled_targets[0].selection_mode != "seoulmetro_select"
     ):
-        raise ValueError("The curl trial requires a Seoul Metro-only run without email.")
+        raise ValueError("The curl URL override requires a Seoul Metro-only run without email.")
     run_dir = config.output_dir / capture_date.isoformat()
     run_dir.mkdir(parents=True, exist_ok=True)
     logger, log_path = _setup_logger(run_dir / "run.log")

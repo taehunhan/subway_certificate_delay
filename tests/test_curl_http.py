@@ -5,13 +5,16 @@ import io
 import json
 import logging
 import subprocess
+import tempfile
 import unittest
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from subway_delay.capture import PlaywrightCaptureService, fetch_seoulmetro_html_pair_curl
 from subway_delay.curl_http import CurlSession, valid_direct_url
+from subway_delay.config import load_config
 from test_capture import RecordingPage, build_target
 
 
@@ -143,7 +146,6 @@ class CurlHttpTests(unittest.TestCase):
 
     def test_curl_capture_reuses_rendering_and_rechecks_actual_dom_date(self):
         target = build_target(target_id="seoulmetro", selection_mode="seoulmetro_select")
-        from dataclasses import replace
         from subway_delay.capture import SeoulMetroHtmlResult
         target = replace(target, url=SOURCE)
         for actual_date in ("2026-10-27", "2026-10-28"):
@@ -163,6 +165,70 @@ class CurlHttpTests(unittest.TestCase):
                     self.assertEqual(fetch.call_args.kwargs["direct_url"], DIRECT)
                 self.assertIn(("route", DIRECT), page.calls)
                 service._wait_for_seoulmetro_capture_ready.assert_awaited_once()
+
+    def test_default_capture_uses_configured_https_url_without_override(self):
+        from subway_delay.capture import SeoulMetroHtmlResult
+        config = load_config(Path(__file__).resolve().parents[1] / "config/targets.yaml")
+        target = next(target for target in config.targets if target.id == "seoulmetro")
+        self.assertEqual(target.url, "https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543")
+        page = RecordingPage(options=[{"value": "1", "text": "2026-10-27", "selected": True}])
+        service = PlaywrightCaptureService(request_logger=self.logger)
+        result = SeoulMetroHtmlResult(INITIAL, SELECTED, target.url)
+        with patch("subway_delay.capture.fetch_seoulmetro_html_pair_curl", return_value=result) as fetch, patch("subway_delay.capture.fetch_seoulmetro_html_pair") as old_fetch:
+            asyncio.run(service._capture_seoulmetro(page, target, date(2026, 10, 27)))
+        old_fetch.assert_not_called()
+        fetch.assert_called_once_with(
+            url=target.url, direct_url=target.url, capture_date=date(2026, 10, 27),
+            timeout_seconds=30, request_logger=self.logger,
+        )
+        self.assertIn(("route", target.url), page.calls)
+        self.assertEqual(len([call for call in page.calls if call[0] == "wait_for_function"]), 2)
+        self.assertIn("curl rendered date verified", self.log.getvalue())
+
+    def test_default_curl_failure_does_not_fall_back_to_urllib_or_render(self):
+        target = replace(build_target(target_id="seoulmetro", selection_mode="seoulmetro_select"), url=DIRECT)
+        service = PlaywrightCaptureService()
+        page = RecordingPage()
+        with patch("subway_delay.capture.fetch_seoulmetro_html_pair_curl", side_effect=RuntimeError("curl exit code 52")) as fetch, patch("subway_delay.capture.fetch_seoulmetro_html_pair") as old_fetch:
+            with self.assertRaisesRegex(RuntimeError, "exit code 52"):
+                asyncio.run(service._capture_seoulmetro(page, target, date(2026, 10, 27)))
+        fetch.assert_called_once()
+        old_fetch.assert_not_called()
+        self.assertEqual(page.calls, [])
+
+    def test_default_browser_dispatch_and_certificate_policy(self):
+        for mode in ("seoulmetro_select", "metro9_tab"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                target = build_target(target_id=mode, selection_mode=mode)
+                page = MagicMock()
+                page.wait_for_selector = AsyncMock()
+                page.locator.return_value.screenshot = AsyncMock()
+                context = AsyncMock()
+                context.new_page.return_value = page
+                browser = AsyncMock()
+                browser.new_context.return_value = context
+                playwright = MagicMock()
+                playwright.chromium.launch = AsyncMock(return_value=browser)
+                manager = MagicMock()
+                manager.__aenter__ = AsyncMock(return_value=playwright)
+                manager.__aexit__ = AsyncMock(return_value=False)
+                service = PlaywrightCaptureService()
+                service._capture_seoulmetro = AsyncMock()
+                service._goto_target_page = AsyncMock()
+                service._apply_date_selection = AsyncMock()
+                with patch("playwright.async_api.async_playwright", return_value=manager):
+                    asyncio.run(service.capture(target=target, capture_date=date(2026, 10, 27), destination=Path(directory) / "capture.png"))
+                self.assertEqual(browser.new_context.call_args.kwargs["ignore_https_errors"], mode != "seoulmetro_select")
+                if mode == "seoulmetro_select":
+                    service._capture_seoulmetro.assert_awaited_once()
+                    service._goto_target_page.assert_not_awaited()
+                else:
+                    service._capture_seoulmetro.assert_not_awaited()
+                    service._goto_target_page.assert_awaited_once()
+                    service._apply_date_selection.assert_awaited_once()
+                page.locator.return_value.screenshot.assert_awaited_once()
+                context.close.assert_awaited_once()
+                browser.close.assert_awaited_once()
 
 
 if __name__ == "__main__":
