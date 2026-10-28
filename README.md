@@ -25,9 +25,15 @@ Commit and push the changes to the branch used by the workflow first. Open **Act
 | --- | --- | --- |
 | `capture` (default) | Normal all-target capture with existing Secrets | Yes |
 | `diagnose-seoulmetro` | urllib/curl GET comparison on the same hosted runner, without launching Chromium | No |
-| `check-seoulmetro` | Seoul Metro only, PNG/ZIP creation and date validation | No |
+| `check-seoulmetro` | Trial curl direct-HTTPS GET/POST for Seoul Metro, PNG/ZIP and date validation | No |
 
-Start with **`diagnose-seoulmetro`**, leaving `diagnostic_url` at its displayed HTTPS URL. That URL is the destination observed on 2026-10-27 (`https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543`). It is an editable **diagnostic input only**, not a production URL change.
+`diagnostic_url` defaults to the HTTPS destination observed on 2026-10-27 (`https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543`). It is editable and affects only the two manual test modes, never the normal `capture` job.
+
+The hosted comparison found one successful direct curl GET. The next step is **`check-seoulmetro`**, leaving `diagnostic_url` at its default. This trial uses curl for GET and date POST with the same cookie file, then renders the returned HTML with Playwright at the POST response's final URL. It does not visit the configured HTTP URL first and does not fall back to urllib. The previous weekday is calculated normally. Inspect the selected date in the PNG, the complete table and the bottom notice. Repeat this mode on GitHub before deciding whether to enable the transport in production; a single successful GET does not establish that POST or capture is reliable.
+
+The trial preserves certificate verification for curl and its browser context. It uses HTTP/1.1 and the same public headers as the successful probe, a 30-second request timeout and 35-second process limit, at most five HTTPS redirects per request, and no internal retry. Each existing outer capture attempt starts a fresh temporary cookie session; GET and POST within that attempt share it. Responses are limited to 5 MB. HTTP errors, curl errors, missing dates and incorrect selected dates fail that attempt. `run.log` records GET/POST status and HTML/DOM date validation, not cookies, raw responses or curl stderr. Temporary responses and cookies are removed even after failures. The hosted capture-check step has an eight-minute limit.
+
+The curl trial is intentionally restricted to `--target seoulmetro --no-email`. SMTP Secrets, cron-job.org, other operators and the normal urllib capture path remain unchanged until the trial is verified. To repeat the GET-only comparison instead, use `diagnose-seoulmetro`.
 
 The probe sequence is the configured URL via urllib, the configured URL via curl, the explicit HTTPS destination via urllib, then the same HTTPS destination via curl. **The direct checks still run when both original requests fail before receiving a redirect.** The explicit destination must use HTTPS and the configured target's hostname/path, without credentials or a fragment. If the input is cleared, the tool instead uses an observed redirect destination when available (urllib first); without either, it records why direct checks were skipped.
 
@@ -46,7 +52,7 @@ If only one client or entry URL succeeds, investigate that difference before cha
 
 ## Capture correctness
 
-Seoul Metro's initial GET final URL is used for POST in the same cookie session, so redirects from the old address do not silently lose the date. The POST response's final URL is used for rendering; the production code hardcodes neither HTTPS nor port 444. Both returned HTML and the rendered dropdown must select exactly the requested date/value, otherwise capture fails. The lines 1-9, bottom notice and height-stability checks remain in place.
+Seoul Metro's initial GET final URL is used for POST in the same cookie session, so redirects from the old address do not silently lose the date. The POST response's final URL is used for rendering; the production code hardcodes neither HTTPS nor port 444. Both returned HTML and the rendered dropdown must select exactly the requested date/value, otherwise capture fails. The same validation, lines 1-9, bottom notice and height-stability checks apply to the curl trial.
 
 This date-integrity correction is independent of the connection failures. It has been verified locally with a real PNG, but does not guarantee GitHub-hosted connectivity.
 
@@ -57,9 +63,11 @@ Recipients and targets remain in [config/targets.yaml](config/targets.yaml). Opt
 Install `requirements.txt` and Chromium with `python -m playwright install chromium` (Linux may also need `--with-deps`). New Python dependencies have not been added. Diagnostics require curl 7.70+ for its JSON timing output; Ubuntu runners include curl.
 
 ```sh
-python main.py --target seoulmetro --no-email --output-dir output/seoulmetro-check
+python main.py --target seoulmetro --no-email --output-dir output/seoulmetro-check --seoulmetro-curl-url 'https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543'
 python -m subway_delay.diagnostics --config config/targets.yaml --direct-url 'https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543'
 python -m unittest discover -s tests -q -b
 ```
 
 `--target ID` selects enabled targets without editing YAML and can be repeated. Unknown/disabled IDs fail before capture. `--output-dir` isolates test artifacts. Optional `--date YYYY-MM-DD` uses a date still available on the site; omitting it selects the previous weekday. Normal calls without these options keep their original behavior.
+
+Omitting `--seoulmetro-curl-url` keeps the existing urllib transport. New Python packages are not required; the trial uses the curl executable already supplied on the Ubuntu runner. `diagnostic_url` must be nonempty for `check-seoulmetro`; no silent fallback is used when it is missing or invalid.

@@ -54,6 +54,32 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIs(args["config"], config)
         self.assertTrue(args["send_email"])
+        self.assertIsNone(args["seoulmetro_curl_url"])
+
+    def test_curl_trial_passes_explicit_url_and_disables_email(self):
+        url = "https://example.com:444"
+        _, args = self.run_main(config_for_test(Path("/tmp")), [
+            "--target", "seoulmetro", "--no-email", "--seoulmetro-curl-url", url,
+        ])
+        self.assertEqual(args["seoulmetro_curl_url"], url)
+        self.assertFalse(args["send_email"])
+
+    def test_curl_trial_rejects_email_other_targets_and_invalid_urls(self):
+        cases = [
+            ["--target", "seoulmetro", "--seoulmetro-curl-url", "https://example.com:444"],
+            ["--no-email", "--seoulmetro-curl-url", "https://example.com:444"],
+            ["--target", "korail", "--no-email", "--seoulmetro-curl-url", "https://example.com:444"],
+            ["--target", "seoulmetro", "--no-email", "--seoulmetro-curl-url", "http://example.com"],
+            ["--target", "seoulmetro", "--no-email", "--seoulmetro-curl-url", ""],
+        ]
+        for arguments in cases:
+            with self.subTest(arguments=arguments), patch("sys.argv", ["main.py", *arguments]), patch(
+                "main.load_config", return_value=config_for_test(Path("/tmp"))
+            ), patch("main.execute_run", new=AsyncMock()) as execute, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    asyncio.run(main.async_main())
+                self.assertEqual(error.exception.code, 2)
+                execute.assert_not_called()
 
     def test_repeated_targets_preserve_config_order_without_duplicates(self):
         _, args = self.run_main(config_for_test(Path("/tmp")), [

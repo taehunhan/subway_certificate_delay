@@ -13,6 +13,7 @@ from urllib.parse import urlencode, urljoin
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from subway_delay.config import TargetConfig
+from subway_delay.curl_http import CurlSession, valid_direct_url
 
 
 class CaptureServiceProtocol(Protocol):
@@ -241,6 +242,23 @@ def fetch_seoulmetro_html_pair(
     return SeoulMetroHtmlResult(initial_html, selected_html, final_url)
 
 
+def fetch_seoulmetro_html_pair_curl(
+    *, url: str, direct_url: str, capture_date: date, timeout_seconds: float,
+    request_logger: logging.Logger,
+) -> SeoulMetroHtmlResult:
+    if not valid_direct_url(url, direct_url):
+        raise ValueError("Seoul Metro curl URL must be HTTPS on the configured hostname and path.")
+    with CurlSession(target_url=url, timeout_seconds=timeout_seconds, logger=request_logger) as session:
+        initial = session.fetch(direct_url)
+        selected_value = option_value_for_date(extract_select_options(initial.html, "view_date"), capture_date)
+        selected = session.fetch(initial.final_url, form_data=build_seoulmetro_form_data(selected_value))
+        _validate_seoulmetro_selection(
+            extract_select_options(selected.html, "view_date"), capture_date, selected_value, "curl POST HTML",
+        )
+        request_logger.info("Seoul Metro curl POST date verified: date=%s value=%s", capture_date, selected_value)
+        return SeoulMetroHtmlResult(initial.html, selected.html, selected.final_url)
+
+
 async def _read_response_text(response, *, url: str, method: str) -> str:
     if not response.ok:
         raise ValueError(f"{method} request failed with status {response.status} for {url}.")
@@ -277,8 +295,13 @@ logger = logging.getLogger(__name__)
 
 
 class PlaywrightCaptureService:
-    def __init__(self, timeout_ms: int = 30_000) -> None:
+    def __init__(
+        self, timeout_ms: int = 30_000, *, seoulmetro_curl_url: str | None = None,
+        request_logger: logging.Logger | None = None,
+    ) -> None:
         self.timeout_ms = timeout_ms
+        self.seoulmetro_curl_url = seoulmetro_curl_url
+        self.request_logger = request_logger or logger
 
     async def capture(
         self,
@@ -296,7 +319,9 @@ class PlaywrightCaptureService:
             context = await browser.new_context(
                 viewport={"width": 1600, "height": 2200},
                 locale="ko-KR",
-                ignore_https_errors=True,
+                ignore_https_errors=not (
+                    target.selection_mode == "seoulmetro_select" and self.seoulmetro_curl_url is not None
+                ),
             )
             page = await context.new_page()
             request_context = None
@@ -476,12 +501,20 @@ class PlaywrightCaptureService:
         target: TargetConfig,
         capture_date: date,
     ) -> None:
-        result = await asyncio.to_thread(
-            fetch_seoulmetro_html_pair,
-            url=target.url,
-            capture_date=capture_date,
-            timeout_seconds=self.timeout_ms / 1000,
-        )
+        if self.seoulmetro_curl_url is not None:
+            result = await asyncio.to_thread(
+                fetch_seoulmetro_html_pair_curl,
+                url=target.url, direct_url=self.seoulmetro_curl_url,
+                capture_date=capture_date, timeout_seconds=self.timeout_ms / 1000,
+                request_logger=self.request_logger,
+            )
+        else:
+            result = await asyncio.to_thread(
+                fetch_seoulmetro_html_pair,
+                url=target.url,
+                capture_date=capture_date,
+                timeout_seconds=self.timeout_ms / 1000,
+            )
         await self._load_document_via_route(
             page,
             url=result.final_url,
@@ -499,6 +532,8 @@ class PlaywrightCaptureService:
             option_value_for_date(extract_select_options(result.initial_html, "view_date"), capture_date),
             "rendered DOM",
         )
+        if self.seoulmetro_curl_url is not None:
+            self.request_logger.info("Seoul Metro curl rendered date verified: date=%s", capture_date)
 
     async def _submit_target_form(self, page, target: TargetConfig) -> None:
         if not target.submit_selector:

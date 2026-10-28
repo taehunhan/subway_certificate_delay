@@ -54,7 +54,14 @@ async def execute_run(
     capture_service: CaptureServiceProtocol | None = None,
     archive_builder: ArchiveBuilderProtocol = build_zip,
     mailer: MailerProtocol | None = None,
+    seoulmetro_curl_url: str | None = None,
 ) -> RunResult:
+    if seoulmetro_curl_url is not None and (
+        send_email or len(config.enabled_targets) != 1
+        or config.enabled_targets[0].id != "seoulmetro"
+        or config.enabled_targets[0].selection_mode != "seoulmetro_select"
+    ):
+        raise ValueError("The curl trial requires a Seoul Metro-only run without email.")
     run_dir = config.output_dir / capture_date.isoformat()
     run_dir.mkdir(parents=True, exist_ok=True)
     logger, log_path = _setup_logger(run_dir / "run.log")
@@ -62,7 +69,9 @@ async def execute_run(
     logger.info("Run started for %s", capture_date.isoformat())
     results = await _capture_targets(
         logger=logger,
-        capture_service=capture_service or PlaywrightCaptureService(),
+        capture_service=capture_service or PlaywrightCaptureService(
+            seoulmetro_curl_url=seoulmetro_curl_url, request_logger=logger,
+        ),
         targets=config.enabled_targets,
         capture_date=capture_date,
         run_dir=run_dir,

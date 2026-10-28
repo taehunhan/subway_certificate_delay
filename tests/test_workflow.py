@@ -47,6 +47,10 @@ class HostedWorkflowTests(unittest.TestCase):
         self.assertEqual(check["if"], "${{ inputs.mode == 'check-seoulmetro' }}")
         self.assertIn("--target seoulmetro --no-email", check["run"])
         self.assertIn("--output-dir output/seoulmetro-check", check["run"])
+        self.assertIn('--seoulmetro-curl-url "$SEOULMETRO_CURL_URL"', check["run"])
+        self.assertEqual(check["env"], {"SEOULMETRO_CURL_URL": "${{ inputs.diagnostic_url }}"})
+        self.assertNotIn("${{", check["run"])
+        self.assertEqual(check["timeout-minutes"], 8)
 
     def test_diagnostics_have_explicit_https_destination_and_artifacts_always_upload(self):
         url = self.trigger["workflow_dispatch"]["inputs"]["diagnostic_url"]["default"]

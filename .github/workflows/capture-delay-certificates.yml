@@ -13,7 +13,7 @@ on:
           - diagnose-seoulmetro
           - check-seoulmetro
       diagnostic_url:
-        description: 'Diagnostic HTTPS destination only; does not change capture configuration'
+        description: 'HTTPS URL for diagnose/check-seoulmetro only; normal capture is unchanged'
         type: string
         required: false
         default: 'https://www.seoulmetro.co.kr:444/kr/delayProofList.do?menuIdx=543'
@@ -72,7 +72,13 @@ jobs:
 
       - name: Check Seoul Metro without email
         if: ${{ inputs.mode == 'check-seoulmetro' }}
-        run: python main.py --target seoulmetro --no-email --output-dir output/seoulmetro-check
+        timeout-minutes: 8
+        env:
+          SEOULMETRO_CURL_URL: ${{ inputs.diagnostic_url }}
+        run: >-
+          python main.py --target seoulmetro --no-email
+          --output-dir output/seoulmetro-check
+          --seoulmetro-curl-url "$SEOULMETRO_CURL_URL"
 
       - name: Upload output artifacts
         if: always()
